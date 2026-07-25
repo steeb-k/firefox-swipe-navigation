@@ -39,6 +39,7 @@ var SwipeAnim = {
       shadow: b("swipeAnim.shadow", true),
       fullTraverse: b("swipeAnim.fullTraverse", true),
       positionalCommit: b("swipeAnim.positionalCommit", true),
+      staleFallback: b("swipeAnim.staleFallback", true),
       pixelSize: f("widget.swipe.pixel-size", 1100),
     };
   },
@@ -315,31 +316,56 @@ var SwipeAnim = {
     const url = browser.currentURI?.spec;
     const t0 = win.performance.now();
 
-    // drawSnapshot's rect is in the CONTENT's own CSS pixels, which page zoom
-    // scales relative to the browser element's chrome CSS size. At 130% zoom the
-    // content viewport is only width/1.3, so passing the element's width asks for
-    // a region 1.3x too wide -- the page then appears too small inside a snapshot
-    // padded with empty space. Divide the rect by zoom and multiply the scale by
-    // it, exactly as ext-tabs-base.js does (`drawSnapshot(rect, scale * zoom)`).
-    // Net bitmap size is unchanged: (w/zoom) * (dpr*zoom) == w * dpr.
+    // The rect MUST be null. drawSnapshot's rect is in DOCUMENT coordinates,
+    // not viewport coordinates -- "the area of the document to render, relative
+    // to the page" (ext-tabs-base.js). So DOMRect(0, 0, w, h) does not mean
+    // "what the user is looking at", it means "the top of the document", and a
+    // page scrolled halfway down still snapshots as its own header. Passing null
+    // is the documented way to ask for the currently visible viewport, and it is
+    // scroll-aware without the parent process needing to know the scroll offset
+    // at all.
+    //
+    // Scale still has to carry zoom. Page zoom scales the content's CSS pixels
+    // relative to the browser element's chrome CSS size, so at 130% the viewport
+    // is only width/1.3 content px across; multiplying the scale by zoom keeps
+    // the bitmap at the same device-pixel size either way, exactly as
+    // ext-tabs-base.js does (`drawSnapshot(rect, scale * zoom)`).
+    //
+    // The fourth argument is resetScrollPosition, and it must stay false: true
+    // would reinstate precisely the bug described above.
     const zoom = browser.fullZoom || 1;
     let bmp;
     try {
       bmp = await wgp.drawSnapshot(
-        new win.DOMRect(0, 0, r.width / zoom, r.height / zoom),
+        null,
         win.devicePixelRatio * zoom,
         "white",
         false
       );
     } catch (e) {
       // drawSnapshot rejects (often NS_ERROR_LOSS_OF_SIGNIFICANT_DATA) when the
-      // content process has not flushed layout -- likelier on a page that has
-      // been idle. Record it: a missing entry is what shows the grey fallback.
+      // content process has not flushed layout, and -- the common case -- when a
+      // navigation has already torn down the WindowGlobal we asked. That second
+      // case is why an entry can be wrong rather than merely absent: we tried to
+      // refresh the page we were leaving, lost the race, and the entry still
+      // holds whatever the page looked like at its LAST successful capture,
+      // typically load time at scroll 0.
+      //
+      // So a failure here is not just a missed opportunity, it is positive
+      // evidence that any entry we already hold for this index is out of date.
+      // Mark it rather than pretending it is good: _buildIncoming refuses to
+      // animate to a marked entry and hands the gesture to the stock arrows.
+      const stalePrev = state.cache.get(idx);
+      if (stalePrev) {
+        stalePrev.stale = true;
+        state.staleMarks = (state.staleMarks || 0) + 1;
+      }
       state.captureFails = (state.captureFails || 0) + 1;
       state.lastCaptureFail = {
         idx,
         url,
         error: String(e && (e.name || e.message || e)),
+        markedStale: !!stalePrev,
         at: new Date().toTimeString().slice(0, 8),
       };
       return;
@@ -407,6 +433,17 @@ var SwipeAnim = {
     };
     state.frames = [];
 
+    // Refresh the page we are standing on, NOW, while it is still on screen and
+    // nothing is navigating. This is the only capture that cannot lose a race,
+    // and it is the image _runCommitAnimation slides off on release -- without
+    // it the outgoing page visibly snaps to whatever scroll offset it had when
+    // it was last captured (usually the top, at load) the instant you let go.
+    // It also means a swipe leaves a correctly-scrolled entry behind, so
+    // swiping straight back the other way lands on the right position too.
+    // Fired before the cards are built so the content-process round trip
+    // overlaps the DOM work below; it lands long before release needs it.
+    this._capture(state, browser, state.gesture.idx).catch(() => {});
+
     stack.style.background = "#1c1b22";
     stack.style.overflow = "hidden";
     browser.style.willChange = "transform";
@@ -442,7 +479,14 @@ var SwipeAnim = {
       canGoForward: state.gesture.canGoForward,
       backHasSnapshot: !!state.incomings.back?.hasSnapshot,
       fwdHasSnapshot: !!state.incomings.fwd?.hasSnapshot,
+      backStale: !!state.incomings.back?.stale,
+      fwdStale: !!state.incomings.fwd?.stale,
       cachedKeys: [...state.cache.keys()].sort((a, b) => a - b),
+      // Entries we know are out of date: a refresh was attempted and lost the
+      // race with the navigation. Swiping to one of these takes the arrows.
+      staleKeys: [...state.cache.entries()]
+        .filter(([, v]) => v.stale)
+        .map(([k]) => k),
       viewportWidth: Math.round(state.gesture.width),
       // A cached bitmap taken at a different window size is a stale snapshot.
       staleSizes: [...state.cache.entries()]
@@ -511,10 +555,16 @@ var SwipeAnim = {
     const g = state.gesture;
     const target = goingBack ? g.idx - 1 : g.idx + 1;
     const entry = state.cache.get(target);
+    // An entry _capture marked stale is a picture of the right page at the
+    // wrong moment -- animating to it promises a destination that is not what
+    // will actually appear. Treat it as no snapshot at all so the gesture falls
+    // back to the arrows, the same as a page we have never seen.
+    const stale = !!entry?.stale && g.cfg.staleFallback;
+    const usable = !!entry && !stale;
     // back uncovers (incoming below), forward covers (incoming above)
     const container = goingBack ? state.underlay : state.overlay;
 
-    const { card } = this._makeCard(state, entry);
+    const { card } = this._makeCard(state, usable ? entry : null);
 
     // Dim sits over whichever page is underneath, and lifts as it takes over.
     const dim = win.document.createXULElement("box");
@@ -532,7 +582,7 @@ var SwipeAnim = {
       container.appendChild(card);
     }
 
-    const rec = { card, dim, goingBack, hasSnapshot: !!entry, target };
+    const rec = { card, dim, goingBack, hasSnapshot: usable, target, stale };
     state.incomings[goingBack ? "back" : "fwd"] = rec;
     return rec;
   },
@@ -605,10 +655,17 @@ var SwipeAnim = {
       state.incomings[goingBack ? "back" : "fwd"] ||
       this._buildIncoming(state, goingBack);
 
-    // No snapshot for the destination: showing a flat grey card is worse than
-    // admitting we cannot do it. Hand this gesture to the stock arrow UI.
+    // No usable snapshot for the destination: showing a flat grey card, or one
+    // we know is out of date, is worse than admitting we cannot do it. Hand
+    // this gesture to the stock arrow UI.
     if (!inc.hasSnapshot) {
-      this._beginDelegate(state, aVal, goingBack, inc.target);
+      this._beginDelegate(
+        state,
+        aVal,
+        goingBack,
+        inc.target,
+        inc.stale ? "stale-snapshot" : "no-snapshot"
+      );
       return;
     }
 
@@ -643,15 +700,19 @@ var SwipeAnim = {
   },
 
   // Fall back to Firefox's own arrow indicator for this gesture.
-  _beginDelegate(state, aVal, goingBack, targetIdx) {
+  _beginDelegate(state, aVal, goingBack, targetIdx, reason) {
     const win = state.win;
     const anim = win.gHistorySwipeAnimation;
     const g = state.gesture;
 
+    if (reason === "stale-snapshot") {
+      state.staleSkips = (state.staleSkips || 0) + 1;
+    }
     state.gestureLog = state.gestureLog || [];
     state.gestureLog.unshift({
       at: new Date().toTimeString().slice(0, 8),
       outcome: "delegated-to-arrows",
+      reason: reason || "no-snapshot",
       dir: goingBack ? "back" : "fwd",
       targetIdx,
       currentIdx: g ? g.idx : null,
@@ -905,9 +966,16 @@ var SwipeAnim = {
       cached: [...state.cache.entries()].map(([k, v]) => ({
         idx: k,
         capturedAtWidth: Math.round(v.cssW || 0),
+        stale: !!v.stale,
       })),
       captureFails: state.captureFails || 0,
       lastCaptureFail: state.lastCaptureFail || null,
+      // How often a capture failure landed on an entry we already held (so the
+      // entry is now known-wrong), and how often that actually cost a gesture.
+      // Both high means the pre-navigation capture is losing its race
+      // routinely, and only a scroll-driven recapture will fix it properly.
+      staleMarks: state.staleMarks || 0,
+      staleSkips: state.staleSkips || 0,
       // Swallowed exceptions. Non-empty here is the usual cause of "no animation".
       errors: state.errors || [],
       gestureLog: (state.gestureLog || []).slice(0, 6),
@@ -1006,6 +1074,7 @@ var SwipeAnim = {
         url: v.url,
         px: `${v.w}x${v.h}`,
         captureMs: v.ms,
+        stale: !!v.stale,
       })),
       lastGestureFrames: f.length,
       medianGap: sorted.length ? sorted[Math.floor(sorted.length / 2)] : null,
@@ -1017,6 +1086,8 @@ var SwipeAnim = {
       // Non-zero here explains a grey fallback page: no snapshot got cached.
       captureFails: state.captureFails || 0,
       lastCaptureFail: state.lastCaptureFail || null,
+      staleMarks: state.staleMarks || 0,
+      staleSkips: state.staleSkips || 0,
       gestureLog: state.gestureLog || [],
       trackerPrefs: {
         pixelSize: (() => { try { return Services.prefs.getFloatPref("widget.swipe.pixel-size"); } catch (e) { return null; } })(),

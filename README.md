@@ -101,12 +101,35 @@ supported way to run privileged JavaScript at startup:
   window and calls `SwipeAnim.install(window)`.
 - `swipe-anim.js` overrides the four `gHistorySwipeAnimation` entry points.
 
-Page imagery comes from `WindowGlobalParent.drawSnapshot()`, captured once per
-navigation while you are sitting on a page and cached against its session
-history index — the same approach as Safari's `ViewSnapshotStore` and Chrome for
-Android's `NavigationEntryScreenshot`. Capture costs roughly 13–17 ms, runs
-asynchronously in the content process, and is never on the gesture's critical
-path.
+Page imagery comes from `WindowGlobalParent.drawSnapshot()`, cached against the
+session history index of the entry it depicts — the same approach as Safari's
+`ViewSnapshotStore` and Chrome for Android's `NavigationEntryScreenshot`.
+Capture costs roughly 13–17 ms, runs asynchronously in the content process, and
+is never on the gesture's critical path.
+
+Snapshots are taken when a page settles after loading, when a navigation starts
+(to refresh the page being left behind), and at the start of every gesture. That
+last one is the reliable one: the page is still on screen and nothing is
+navigating, so it cannot lose a race. It is what the release animation slides
+off, and it leaves a correctly-scrolled entry behind for the return trip.
+
+**`drawSnapshot()`'s rect is in document coordinates, not viewport
+coordinates.** This is the single easiest thing to get wrong here. A rect of
+`(0, 0, width, height)` reads as "what the user is looking at" and is in fact
+"the top of the document" — a page scrolled halfway down snapshots as its own
+header, so every swipe appears to navigate back to the top of the page. Passing
+`null` is the documented way to request the currently visible viewport, and it
+is scroll-aware without the parent process ever needing to know the scroll
+offset. The fourth argument, `resetScrollPosition`, must stay `false` for the
+same reason.
+
+The pre-navigation refresh is a genuine race, separately: `drawSnapshot()` is an
+asynchronous round trip to the content process, and a navigation can tear down
+the `WindowGlobal` before it is serviced. Unlike WebKit, which snapshots from a
+live layer tree in its UI process, there is no synchronous alternative. When it
+loses, the cached entry still holds the page as of its last successful capture.
+Rather than animate to an image known to be out of date, a failed refresh marks
+its entry, and swiping to a marked entry falls back to the arrows.
 
 During a gesture two containers are inserted into the browser stack: an underlay
 that paints below the `<browser>` and an overlay that paints above it. This is
@@ -138,6 +161,7 @@ All read live from `about:config`.
 | `swipeAnim.commitMs` | `260` | Duration of the settle animation after you let go. |
 | `swipeAnim.fullTraverse` | `true` | Keeps `widget.swipe.pixel-size` matched to the viewport width (see below). |
 | `swipeAnim.positionalCommit` | `true` | Commit/cancel decided by where you release rather than by gesture velocity (see below). |
+| `swipeAnim.staleFallback` | `true` | Fall back to the arrows when the destination's snapshot is known to be out of date. Set to `false` to animate to it anyway, accepting that the scroll position may be wrong. |
 
 ### Two Firefox internals worth knowing about
 
@@ -178,9 +202,24 @@ SwipeAnim.reset(window)    // clear state and remove leftovers, keeping the snap
 that were caught and swallowed, snapshot capture failures, and a log of recent
 gestures including which directions had a cached snapshot.
 
-If a destination page has no cached snapshot — the first visit in a session, or
-after the cache has evicted it — that gesture falls back to Firefox's own arrow
-indicator rather than showing a blank card.
+If a destination page has no usable snapshot — never visited this session,
+evicted from the cache, or known to be out of date — that gesture falls back to
+Firefox's own arrow indicator rather than showing a blank or misleading card.
+`gestureLog` records which of those it was under `reason`.
+
+Two counters are worth watching if back-swipes fall back to the arrows more
+often than you would like:
+
+```js
+SwipeAnim.stats(window).staleMarks   // refreshes that lost their race
+SwipeAnim.stats(window).staleSkips   // gestures that cost you
+```
+
+`staleMarks` climbing during ordinary browsing means the pre-navigation refresh
+is routinely losing to the navigation, which is a limitation of doing the
+capture over IPC rather than anything misconfigured. Setting
+`swipeAnim.staleFallback` to `false` trades the arrow fallback back for an
+animation that may show the wrong scroll position.
 
 ## Known limitations
 
