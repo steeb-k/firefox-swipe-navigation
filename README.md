@@ -2,6 +2,28 @@
 
 Safari-style 1:1 back/forward swipe animations for Firefox on Linux.
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh | bash
+```
+
+Then quit Firefox completely and restart it. Requires Firefox 111+ on Linux/GTK,
+and sudo once — the script asks for it itself, so do **not** run it under sudo.
+
+It clones this repository to `~/.local/share/firefox-swipe-navigation` and runs
+`install.sh`, which lists the Firefox installations it found and asks which to
+install into. The checkout is permanent and yours: `swipe-anim.js` stays there
+and is re-read every time a window opens, so you can edit it without root.
+Re-run the same line any time to update.
+
+If piping a script to a shell makes you uneasy — reasonably, since it calls
+sudo — read it first and run it separately:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh -o get.sh
+less get.sh
+bash get.sh
+```
+
 Firefox already tracks a two-finger horizontal trackpad swipe continuously — it
 just slides a small arrow indicator across the viewport rather than moving the
 page. This replaces the arrow with the actual pages: the previous page sits
@@ -27,11 +49,16 @@ extension.
 
 ## Install
 
+The one-liner at the top is the short version of this:
+
 ```sh
 git clone https://github.com/steeb-k/firefox-swipe-navigation.git
 cd firefox-swipe-navigation
 sudo ./install.sh
 ```
+
+Clone wherever you like — the location is baked into the loader, so just don't
+move or delete it afterwards.
 
 With no arguments the installer searches the usual locations — `/usr/lib`,
 `/usr/lib64`, `/usr/local/lib`, `/opt`, Snap, Flatpak and a few paths under your
@@ -56,15 +83,25 @@ SWIPE_ASSUME_ALL=1 sudo ./install.sh                  # every detected install
 SWIPE_EXTRA_DIRS="/custom/path" sudo ./install.sh     # widen the search
 ```
 
+`SWIPE_ASSUME_ALL` and `SWIPE_EXTRA_DIRS` are forwarded by the one-liner too, and
+`SWIPE_HOME` changes where it puts the checkout:
+
+```sh
+SWIPE_ASSUME_ALL=1 SWIPE_HOME=~/src/swipe bash get.sh
+```
+
 Then quit Firefox completely and restart it.
 
 Only the install step needs root. `swipe-anim.js` stays in the cloned
 repository and is re-read on every window open, so to iterate you edit it and
-restart Firefox — no root, no reinstall.
+restart Firefox — no root, no reinstall. Re-running the one-liner will refuse to
+fast-forward over local edits rather than discard them, and tells you how to
+keep or drop them.
 
 ## Uninstall
 
 ```sh
+cd ~/.local/share/firefox-swipe-navigation   # wherever you cloned it
 sudo ./uninstall.sh
 ```
 
