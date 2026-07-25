@@ -1,0 +1,54 @@
+// IMPORTANT: the first line of an autoconfig .cfg file is always skipped.
+// firefox-swipe-navigation-marker
+// Loader for the 1:1 swipe navigation animation.
+//
+// install.sh substitutes @PAYLOAD_PATH@ and writes the result to
+// <firefox-install-dir>/mozilla.cfg. This file stays deliberately small: it only
+// loads the real payload, so you can edit swipe-anim.js and restart Firefox
+// without needing root again.
+
+try {
+  (function () {
+    const PAYLOAD_URL = "file://@PAYLOAD_PATH@";
+
+    const svc =
+      (typeof Services !== "undefined" && Services) || globalThis.Services;
+    if (!svc) {
+      return;
+    }
+
+    function loadInto(win) {
+      try {
+        // Cache-bust so a restart always picks up the edited payload.
+        svc.scriptloader.loadSubScript(PAYLOAD_URL + "?v=" + Date.now(), win);
+        if (win.SwipeAnim) {
+          win.SwipeAnim.install(win);
+        }
+      } catch (e) {
+        Cu.reportError("[swipe-anim] load failed: " + e);
+      }
+    }
+
+    const observer = {
+      observe(subject, topic) {
+        if (topic !== "browser-delayed-startup-finished") {
+          return;
+        }
+        loadInto(subject);
+      },
+    };
+
+    svc.obs.addObserver(observer, "browser-delayed-startup-finished");
+
+    // Catch any window that already finished starting up.
+    const e = svc.wm.getEnumerator("navigator:browser");
+    while (e.hasMoreElements()) {
+      const win = e.getNext();
+      if (win.gBrowserInit && win.gBrowserInit.delayedStartupFinished) {
+        loadInto(win);
+      }
+    }
+  })();
+} catch (e) {
+  Cu.reportError("[swipe-anim] autoconfig error: " + e);
+}

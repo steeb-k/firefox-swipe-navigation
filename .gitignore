@@ -1,0 +1,3 @@
+# Install manifests and backed-up originals; created by install.sh, and needed
+# locally by uninstall.sh to roll back.
+/backups/
