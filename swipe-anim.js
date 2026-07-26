@@ -45,6 +45,7 @@ var SwipeAnim = {
       positionalCommit: b("swipeAnim.positionalCommit", true),
       staleFallback: b("swipeAnim.staleFallback", true),
       urlCheck: b("swipeAnim.urlCheck", true),
+      fingerDots: b("swipeAnim.fingerDots", false),
       pixelSize: f("widget.swipe.pixel-size", 1100),
     };
   },
@@ -122,6 +123,8 @@ var SwipeAnim = {
       tabSeq: 0,
       underlay: null,
       overlay: null,
+      fingers: null,
+      fadingFingers: null,
       incomings: { back: null, fwd: null },
       gesture: null,
       frames: [],
@@ -716,6 +719,17 @@ var SwipeAnim = {
     state.overlay.id = "swipeAnimOverlay";
     stack.appendChild(state.overlay);
 
+    // Last child, so the dots ride above both pages rather than being covered
+    // by whichever one is sliding in.
+    if (state.fadingFingers) {
+      state.fadingFingers.remove();
+      state.fadingFingers = null;
+    }
+    state.fingers = null;
+    if (state.gesture.cfg.fingerDots) {
+      stack.appendChild(this._buildFingers(state));
+    }
+
     state.incomings = { back: null, fwd: null };
     if (state.gesture.canGoBack) {
       this._buildIncoming(state, true);
@@ -891,6 +905,108 @@ var SwipeAnim = {
     return rec;
   },
 
+  // A screencast aid, off by default: two dots standing in for the fingers on
+  // the trackpad. Their position is invented -- there is no real one to draw.
+  // GTK reports a touchpad swipe as one displacement plus a finger count, and
+  // Gecko forwards only the displacement, so where on the pad the hand actually
+  // sits is never known to any of this. What is not invented is the travel:
+  // pixel-size is pinned to the viewport width, so `dx` is the fingers'
+  // displacement in CSS pixels, and the dots carry it 1:1 exactly as the page
+  // does. The dots are what your hand did, drawn somewhere plausible.
+  FINGER_R: 15,
+  FINGER_GAP: 78,
+
+  _buildFingers(state) {
+    const win = state.win;
+    const g = state.gesture;
+    const box = win.document.createXULElement("box");
+    box.id = "swipeAnimFingers";
+    box.style.cssText =
+      "position:absolute; inset:0; overflow:hidden; pointer-events:none;";
+
+    // One mover carrying both dots: a gesture translates the hand, not the
+    // fingers independently, and it keeps the per-frame work to one style write.
+    const hand = win.document.createXULElement("box");
+    hand.style.cssText = "position:absolute; inset:0; will-change:translate;";
+    box.appendChild(hand);
+
+    const r = this.FINGER_R;
+    const top = Math.round(g.height * 0.62) - r;
+    const dots = [];
+    for (const side of [-1, 1]) {
+      const dot = win.document.createXULElement("box");
+      dot.style.cssText =
+        `position:absolute; top:${top}px; ` +
+        `left:${Math.round(side * this.FINGER_GAP * 0.5) - r}px; ` +
+        `width:${r * 2}px; height:${r * 2}px; border-radius:50%; ` +
+        // Light fill with a dark rim so it stays legible on both a dark page
+        // and a white one, without knowing which it is over.
+        `background:radial-gradient(circle at 38% 32%, rgba(255,255,255,0.96), ` +
+        `rgba(228,228,236,0.78) 60%, rgba(188,188,202,0.62) 100%); ` +
+        `border:1.5px solid rgba(0,0,0,0.4); ` +
+        `box-shadow:0 3px 12px rgba(0,0,0,0.45); ` +
+        `opacity:0; scale:0.6; ` +
+        `transition:opacity 90ms ease-out, scale 90ms ease-out;`;
+      hand.appendChild(dot);
+      dots.push(dot);
+    }
+    state.fingers = { box, hand, dots, anchor: null, lifted: false };
+    return box;
+  },
+
+  _moveFingers(state, dx) {
+    const f = state.fingers;
+    if (!f || f.lifted) {
+      return;
+    }
+    const g = state.gesture;
+    if (f.anchor === null) {
+      // Which way the hand is going is only knowable once it has moved, and the
+      // anchor depends on it: at 1:1 a full traverse is a whole viewport width,
+      // so starting centred would run the dots off the screen halfway through.
+      // Starting them offset against the travel buys most of a traverse.
+      if (Math.abs(dx) < 2) {
+        return;
+      }
+      f.anchor = g.width * 0.5 - Math.sign(dx) * g.width * 0.26;
+      for (const dot of f.dots) {
+        dot.style.opacity = "1";
+        dot.style.scale = "1";
+      }
+    }
+    // Past a traverse the 1:1 claim has to give somewhere; better the dots
+    // stall at the edge than leave the frame mid-gesture.
+    const pad = this.FINGER_R + this.FINGER_GAP * 0.5 + 6;
+    const x = Math.max(pad, Math.min(g.width - pad, f.anchor + dx));
+    f.hand.style.translate = `${x.toFixed(1)}px 0px`;
+  },
+
+  // The fingers come off the pad at release, so the dots fade there rather than
+  // riding the commit animation out. Ownership moves to a timer: the cancel
+  // path tears down immediately, and _teardown's sweep would otherwise cut the
+  // fade off. _onStart clears any straggler before building the next pair.
+  _liftFingers(state) {
+    const f = state.fingers;
+    state.fingers = null;
+    if (!f || f.lifted) {
+      return;
+    }
+    f.lifted = true;
+    f.box.id = "";
+    state.fadingFingers = f.box;
+    for (const dot of f.dots) {
+      dot.style.transition = "opacity 150ms ease-in, scale 150ms ease-in";
+      dot.style.opacity = "0";
+      dot.style.scale = "0.82";
+    }
+    state.win.setTimeout(() => {
+      f.box.remove();
+      if (state.fadingFingers === f.box) {
+        state.fadingFingers = null;
+      }
+    }, 220);
+  },
+
   _onUpdate(state, aVal) {
     const win = state.win;
     // Once we have handed a gesture to the stock arrow UI, stay out of the way.
@@ -912,6 +1028,15 @@ var SwipeAnim = {
     if (g.rec) {
       g.rec.used = ++state.tick;
     }
+
+    // True 1:1: |aVal| * pixelSize is the finger's CSS-pixel travel. Computed
+    // before the no-such-entry bail below, because the hand keeps moving even
+    // when there is nothing to navigate to and the page must stay put.
+    let dx = aVal * g.cfg.pixelSize;
+    if (Math.abs(dx) > g.width) {
+      dx = Math.sign(dx) * g.width;
+    }
+    this._moveFingers(state, dx);
 
     // Diagnostic: SwipeTracker pins the reported delta to exactly
     // 0.999 * kSwipeSuccessThreshold (0.24975) when it wants to suppress the
@@ -947,11 +1072,6 @@ var SwipeAnim = {
     }
     g.lastCommitDir = goingBack ? "back" : "fwd";
 
-    // True 1:1: |aVal| * pixelSize is the finger's CSS-pixel travel.
-    let dx = aVal * g.cfg.pixelSize;
-    if (Math.abs(dx) > g.width) {
-      dx = Math.sign(dx) * g.width;
-    }
     const t = Math.min(Math.abs(dx) / g.width, 1); // 0..1 progress
     // Which edge the incoming page comes from: content moving right (dx>0)
     // reveals the left edge.
@@ -1051,6 +1171,7 @@ var SwipeAnim = {
   _onStop(state) {
     const win = state.win;
     const g = state.gesture;
+    this._liftFingers(state);
     if (state.delegating) {
       state.delegating = false;
       try {
@@ -1390,7 +1511,11 @@ var SwipeAnim = {
     // (or by a re-install replacing `state`) is unreachable from these refs and
     // would survive as a leftover strip over the page.
     try {
-      for (const id of ["swipeAnimUnderlay", "swipeAnimOverlay"]) {
+      for (const id of [
+        "swipeAnimUnderlay",
+        "swipeAnimOverlay",
+        "swipeAnimFingers",
+      ]) {
         for (const node of [...win.document.querySelectorAll("#" + id)]) {
           node.remove();
         }

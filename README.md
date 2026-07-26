@@ -2,12 +2,12 @@
 
 Safari-style 1:1 back/forward swipe animations for Firefox on Linux.
 
-![A two-finger swipe dragging a GitHub repository page off to the right, revealing the profile page sitting still underneath, then a switch to a second tab where the same gesture slides two more pages over each other](https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/assets/demo.webp)
+![Two dots tracking a trackpad gesture as it drags one page off another and back again, across two tabs and from several scroll positions](https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/assets/demo.webp)
 
-Swiping back and forth in one tab, then in another, in real time. The previous
-page sits still underneath while the current one slides off it, tracking the
-gesture pixel for pixel — at page zoom, from wherever the page happens to be
-scrolled, and with each tab holding its own snapshots.
+Real time, across two tabs. The previous page sits still underneath while the
+current one slides off it, tracking the gesture pixel for pixel, and a page
+scrolled halfway down comes back exactly where it was left. The two dots stand
+in for the fingers on the trackpad — `swipeAnim.fingerDots`, off by default.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh | bash
@@ -219,7 +219,16 @@ before first paint.
 
 ## Configuration
 
-All read live from `about:config`.
+All read live from `about:config`. None of them exist there until you make them:
+Firefox only lists preferences that have actually been set, so searching for one
+of these shows an empty result and a row offering to create it. Pick the type
+from the table and add it. From the Browser Console it is one line, and takes
+effect on the next gesture:
+
+```js
+Services.prefs.setBoolPref("swipeAnim.fingerDots", true)
+```
+
 
 | Preference | Default | Meaning |
 | --- | --- | --- |
@@ -231,6 +240,7 @@ All read live from `about:config`.
 | `swipeAnim.positionalCommit` | `true` | Commit/cancel decided by where you release rather than by gesture velocity (see below). |
 | `swipeAnim.staleFallback` | `true` | Fall back to the arrows when the destination's snapshot is known to be out of date. Set to `false` to animate to it anyway, accepting that the scroll position may be wrong. |
 | `swipeAnim.urlCheck` | `true` | Cross-check a destination snapshot's URL against the history entry before animating to it. Turn off only if `stats().urlMismatches` climbs during ordinary browsing, which would mean the check is misfiring rather than catching anything. |
+| `swipeAnim.fingerDots` | `false` | Draw two dots that ride the gesture, standing in for the fingers on the trackpad. Meant for screencasts, which is why it is off by default. Where they sit is invented — nothing in the stack reports where your hand actually is — but how far they travel is the real gesture displacement, 1:1 with the page. |
 
 ### Two Firefox internals worth knowing about
 
