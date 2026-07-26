@@ -2,6 +2,12 @@
 
 Safari-style 1:1 back/forward swipe animations for Firefox on Linux.
 
+![A two-finger swipe dragging a scrolled GitHub repository page off to the right, revealing the profile page sitting still underneath, then a swipe the other way bringing the repository back at the same scroll position](https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/assets/demo.gif)
+
+Swiping back off a scrolled page and forward again, in real time. The previous
+page sits still underneath while the current one slides off it, tracking the
+gesture pixel for pixel, and the scroll position survives the round trip.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh | bash
 ```
