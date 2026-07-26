@@ -557,17 +557,19 @@ var SwipeAnim = {
     // Scale still has to carry zoom. Page zoom scales the content's CSS pixels
     // relative to the browser element's chrome CSS size, so at 130% the viewport
     // is only width/1.3 content px across; multiplying the scale by zoom keeps
-    // the bitmap at the same device-pixel size either way, exactly as
-    // ext-tabs-base.js does (`drawSnapshot(rect, scale * zoom)`).
+    // the bitmap at roughly the same device-pixel size either way. But only
+    // roughly -- see _captureScale for why dpr*zoom, which is what
+    // ext-tabs-base.js passes, is a fraction of a percent wrong.
     //
     // The fourth argument is resetScrollPosition, and it must stay false: true
     // would reinstate precisely the bug described above.
     const zoom = browser.fullZoom || 1;
+    const dpr = win.devicePixelRatio;
     let bmp;
     try {
       bmp = await wgp.drawSnapshot(
         null,
-        win.devicePixelRatio * zoom,
+        this._captureScale(dpr, zoom),
         "white",
         false
       );
@@ -607,6 +609,10 @@ var SwipeAnim = {
       h: bmp.height,
       cssW: r.width,
       cssH: r.height,
+      // Needed to turn cssW/cssH back into device pixels at draw time. Reading
+      // the live devicePixelRatio there instead would silently use the new
+      // monitor's ratio for a bitmap taken on the old one.
+      dpr,
       zoom,
       idx,
       url,
@@ -614,6 +620,33 @@ var SwipeAnim = {
     });
     this._evictTab(rec, idx);
     this._evictGlobal(state, rec);
+  },
+
+  // The device scale a page is ACTUALLY rendered at, which is not dpr * zoom.
+  // Gecko lays out on an integer number of app units per device pixel (there
+  // are 60 app units to a CSS pixel), so the achievable scales are 60/n. At dpr
+  // 1.25 and zoom 1.1 the request is 1.375, but 60/1.375 = 43.6 rounds to 44,
+  // and the page is really drawn at 60/44 = 1.3636 -- 0.8% off.
+  //
+  // That matters because drawSnapshot's scale multiplies a viewport measured in
+  // CONTENT css px, and that viewport was itself sized by the real scale. Ask
+  // for dpr*zoom and the bitmap comes back 0.8% wider than the browser element,
+  // so the compositor resamples the entire snapshot to fit -- a uniform
+  // softness over the whole page with no misalignment to give it away. Measured
+  // against the live page it costs 30-67% of the edge energy, at every zoom
+  // step whose dpr*zoom misses a 60/n (which is most of them; 100% is usually
+  // exact, which is why only zoomed pages look soft).
+  //
+  // ext-tabs-base.js rounds the same way. It does not show up there because
+  // captureVisibleTab hands back a PNG instead of compositing it over the live
+  // page at 1:1.
+  _captureScale(dpr, zoom) {
+    const AU_PER_CSS_PX = 60;
+    const want = dpr * zoom;
+    if (!(want > 0)) {
+      return 1;
+    }
+    return AU_PER_CSS_PX / Math.max(1, Math.round(AU_PER_CSS_PX / want));
   },
 
   _onStart(state) {
@@ -741,18 +774,38 @@ var SwipeAnim = {
         "http://www.w3.org/1999/xhtml",
         "canvas"
       );
-      canvas.width = entry.w;
-      canvas.height = entry.h;
-      const ctx = canvas.getContext("2d", { alpha: false });
-      ctx.drawImage(entry.bitmap, 0, 0);
       const cw = entry.cssW || g.width;
       const ch = entry.cssH || g.height;
+      // The backing store is sized to the DISPLAY box in device pixels, not to
+      // the bitmap. Even at the corrected capture scale the two disagree by a
+      // pixel or three, because drawSnapshot rounds the viewport up to a whole
+      // content css px -- and a 1719-wide backing store inside a box 1718 device
+      // px wide is resampled across its entire width, which softens every glyph
+      // on the page just as surely as a 1% error does. Sizing the store to the
+      // box and letting the spare column fall outside it makes the compositor
+      // map texel to pixel 1:1. It costs nothing: an undestined drawImage is a
+      // straight blit, cheaper than the filtered one it replaces.
+      //
+      // Clamped to the bitmap so a short capture can never leave an uncovered
+      // strip -- in that case the canvas stays bitmap-sized and comes up narrow,
+      // and the card's sampled fill shows through, exactly as it does for a
+      // snapshot taken at a smaller window size.
+      const dpr = entry.dpr || win.devicePixelRatio;
+      const pw = Math.max(1, Math.min(entry.w, Math.round(cw * dpr)));
+      const ph = Math.max(1, Math.min(entry.h, Math.round(ch * dpr)));
+      canvas.width = pw;
+      canvas.height = ph;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      ctx.drawImage(entry.bitmap, 0, 0);
+      // Back through the same dpr, so the box is a whole number of device pixels
+      // rather than the fractional width getBoundingClientRect reports.
       canvas.style.cssText =
-        `position:absolute; top:0; left:0; width:${cw}px; height:${ch}px;`;
+        `position:absolute; top:0; left:0; ` +
+        `width:${pw / dpr}px; height:${ph / dpr}px;`;
       try {
         const d = ctx.getImageData(
-          Math.max(0, entry.w - 2),
-          Math.max(0, entry.h - 2),
+          Math.max(0, pw - 2),
+          Math.max(0, ph - 2),
           1,
           1
         ).data;
