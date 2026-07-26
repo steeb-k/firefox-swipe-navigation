@@ -10,7 +10,11 @@
 // overlay that paints above it.
 
 var SwipeAnim = {
-  MAX_CACHE: 6,
+  // Per tab. Full-viewport bitmaps at devicePixelRatio are not small, so a
+  // per-tab budget alone is not a budget at all across forty tabs -- MAX_TOTAL
+  // caps the whole window and evicts from least-recently-touched tabs first.
+  MAX_CACHE: 4,
+  MAX_TOTAL: 24,
 
   // Tunables. Read live from prefs so they can be changed in about:config
   // without editing this file.
@@ -40,6 +44,7 @@ var SwipeAnim = {
       fullTraverse: b("swipeAnim.fullTraverse", true),
       positionalCommit: b("swipeAnim.positionalCommit", true),
       staleFallback: b("swipeAnim.staleFallback", true),
+      urlCheck: b("swipeAnim.urlCheck", true),
       pixelSize: f("widget.swipe.pixel-size", 1100),
     };
   },
@@ -108,7 +113,13 @@ var SwipeAnim = {
 
     const state = {
       win,
-      cache: new Map(), // sh-index -> {bitmap, w, h, url}
+      // permanentKey -> {key, id, cache: Map(entryKey -> entry), lastIdx, used}
+      // NOT a flat index -> entry map: session history indices are per-tab, so
+      // one map means tab A's index 2 and tab B's index 2 are the same slot and
+      // swiping in one tab shows the other tab's page.
+      caches: new Map(),
+      tick: 0,
+      tabSeq: 0,
       underlay: null,
       overlay: null,
       incomings: { back: null, fwd: null },
@@ -160,7 +171,10 @@ var SwipeAnim = {
 
     // Snapshots are taken while we are sitting stably ON an entry, so the entry
     // we are about to leave has always already been captured under its own key.
-    state.lastIdx = this._shIndex(win.gBrowser.selectedBrowser);
+    // lastIdx lives on the per-tab record, not on state: a tab switch would
+    // otherwise leave it pointing at the other tab's position, and the
+    // pre-navigation refresh would file the outgoing pixels under a wrong key.
+    this._cacheFor(state, win.gBrowser.selectedBrowser);
     state.settleTimer = null;
 
     const scheduleSettleCapture = browser => {
@@ -169,11 +183,17 @@ var SwipeAnim = {
       }
       state.settleTimer = win.setTimeout(() => {
         state.settleTimer = null;
+        // drawSnapshot on a backgrounded tab is not reliably a picture of
+        // anything, so a tab switched away from before its capture landed
+        // simply misses. The TabSelect handler below covers the return trip.
         if (browser !== win.gBrowser.selectedBrowser) {
           return;
         }
         const idx = self._shIndex(browser);
-        state.lastIdx = idx;
+        const rec = self._cacheFor(state, browser);
+        if (rec) {
+          rec.lastIdx = idx;
+        }
         self._capture(state, browser, idx).catch(() => {});
       }, 350);
     };
@@ -189,7 +209,15 @@ var SwipeAnim = {
         }
         if (flags & WPL.STATE_START) {
           // Refresh the page we are leaving, keyed by where we actually were.
-          self._capture(state, browser, state.lastIdx).catch(() => {});
+          // Deliberately a peek and not _cacheFor: sessionHistory.index has
+          // already moved by now, so a record created here would take the
+          // DESTINATION index as its lastIdx and file the outgoing page's
+          // pixels under the incoming entry. With no record there is also
+          // nothing cached to refresh, so skipping costs nothing.
+          const rec = state.caches.get(browser.permanentKey);
+          if (rec) {
+            self._capture(state, browser, rec.lastIdx).catch(() => {});
+          }
         } else if (flags & WPL.STATE_STOP) {
           scheduleSettleCapture(browser);
         }
@@ -203,14 +231,53 @@ var SwipeAnim = {
         if (browser !== win.gBrowser.selectedBrowser) {
           return;
         }
-        state.lastIdx = self._shIndex(browser);
+        const rec = self._cacheFor(state, browser);
+        if (rec) {
+          rec.lastIdx = self._shIndex(browser);
+        }
         scheduleSettleCapture(browser);
       },
     };
     win.gBrowser.addTabsProgressListener(state.listener);
-    self._capture(state, win.gBrowser.selectedBrowser, state.lastIdx).catch(
-      () => {}
-    );
+    self
+      ._capture(
+        state,
+        win.gBrowser.selectedBrowser,
+        self._shIndex(win.gBrowser.selectedBrowser)
+      )
+      .catch(() => {});
+
+    // Background tabs are not captured (see scheduleSettleCapture), so a tab
+    // may have navigated any number of times since we last looked at it.
+    // Re-anchor lastIdx and snapshot where it actually is now.
+    state.onTabSelect = () => {
+      try {
+        const browser = win.gBrowser.selectedBrowser;
+        const rec = self._cacheFor(state, browser);
+        if (rec) {
+          rec.lastIdx = self._shIndex(browser);
+        }
+        scheduleSettleCapture(browser);
+      } catch (e) {}
+    };
+    win.gBrowser.tabContainer.addEventListener("TabSelect", state.onTabSelect);
+
+    // ImageBitmap holds GPU-side memory that GC will not reclaim on its own
+    // schedule, so a closed tab's snapshots have to be released explicitly.
+    state.onTabClose = event => {
+      try {
+        const key = event.target?.linkedBrowser?.permanentKey;
+        const rec = key && state.caches.get(key);
+        if (!rec) {
+          return;
+        }
+        for (const k of [...rec.cache.keys()]) {
+          self._dropEntry(rec, k);
+        }
+        state.caches.delete(key);
+      } catch (e) {}
+    };
+    win.gBrowser.tabContainer.addEventListener("TabClose", state.onTabClose);
 
     // Changing page zoom re-lays-out the content but fires no navigation, so the
     // cached snapshot would keep the old zoom until the next navigation.
@@ -250,6 +317,22 @@ var SwipeAnim = {
         win.gBrowser.removeTabsProgressListener(state.listener);
       } catch (e) {}
     }
+    if (state.onTabSelect) {
+      try {
+        win.gBrowser.tabContainer.removeEventListener(
+          "TabSelect",
+          state.onTabSelect
+        );
+      } catch (e) {}
+    }
+    if (state.onTabClose) {
+      try {
+        win.gBrowser.tabContainer.removeEventListener(
+          "TabClose",
+          state.onTabClose
+        );
+      } catch (e) {}
+    }
     if (state.onResize) {
       try {
         win.removeEventListener("resize", state.onResize);
@@ -276,12 +359,21 @@ var SwipeAnim = {
       } catch (e) {}
     }
     this._teardown(state);
-    for (const entry of state.cache.values()) {
+    // state.cache is the pre-per-tab flat map. install() calls uninstall()
+    // first, so reloading this file into a live window has to be able to
+    // release a cache built by the older shape rather than throw past it.
+    for (const entry of state.cache?.values() || []) {
       try {
         entry.bitmap.close();
       } catch (e) {}
     }
-    state.cache.clear();
+    state.cache?.clear();
+    for (const rec of state.caches?.values() || []) {
+      for (const key of [...rec.cache.keys()]) {
+        this._dropEntry(rec, key);
+      }
+    }
+    state.caches?.clear();
     delete win.__swipeAnimState;
     return "uninstalled";
   },
@@ -291,6 +383,126 @@ var SwipeAnim = {
       return browser.browsingContext.sessionHistory.index;
     } catch (e) {
       return -1;
+    }
+  },
+
+  // The snapshot cache is per tab, keyed by permanentKey -- the identity that
+  // survives a remoteness switch, unlike the <browser> element or its panel id.
+  _cacheFor(state, browser) {
+    const key = browser?.permanentKey;
+    if (!key) {
+      return null;
+    }
+    let rec = state.caches.get(key);
+    if (!rec) {
+      rec = {
+        key,
+        id: ++state.tabSeq,
+        cache: new Map(),
+        lastIdx: this._shIndex(browser),
+        used: 0,
+      };
+      state.caches.set(key, rec);
+    }
+    rec.used = ++state.tick;
+    return rec;
+  },
+
+  // Session history indices are reused twice over. Across tabs every tab has an
+  // index 2, and within one tab a new navigation truncates forward history, so
+  // a later page inherits the index a different page used to hold. Either way
+  // an index-keyed cache hands back a picture of the wrong page.
+  //
+  // nsISHEntry.ID is allocated from a parent-process counter, so it identifies
+  // one history entry for the life of the session and survives both. Falling
+  // back to the bare index when it cannot be read is still correct within the
+  // tab -- it just loses the truncation guarantee -- so the two key spaces are
+  // prefixed to keep them from colliding with each other.
+  //
+  // The ID is NOT safe as a global key, which is why it is only ever used
+  // inside a tab's own map. SessionHistory.sys.mjs reassigns IDs on restore
+  // starting from `Date.now()`, with its uniqueness set (`idMap.used`) scoped
+  // to one tab's restore -- so two tabs restored in the same millisecond can
+  // legitimately hold entries with equal IDs. Per-tab maps make that a
+  // non-event; one flat ID-keyed map would reintroduce the very bug this
+  // replaced.
+  _entryKey(browser, idx) {
+    if (!(idx >= 0)) {
+      return null;
+    }
+    try {
+      const id = browser.browsingContext.sessionHistory.getEntryAtIndex(idx)?.ID;
+      if (id) {
+        return "e" + id;
+      }
+    } catch (e) {}
+    return "i" + idx;
+  },
+
+  _entryURL(browser, idx) {
+    if (!(idx >= 0)) {
+      return null;
+    }
+    try {
+      return (
+        browser.browsingContext.sessionHistory.getEntryAtIndex(idx)?.URI?.spec ||
+        null
+      );
+    } catch (e) {
+      return null;
+    }
+  },
+
+  _dropEntry(rec, key) {
+    const entry = rec.cache.get(key);
+    if (entry) {
+      try {
+        entry.bitmap.close();
+      } catch (e) {}
+    }
+    rec.cache.delete(key);
+  },
+
+  // Within a tab, evict whatever is furthest from where we are standing --
+  // history distance is a decent proxy for how likely you are to swipe to it.
+  _evictTab(rec, curIdx) {
+    if (rec.cache.size <= this.MAX_CACHE) {
+      return;
+    }
+    const keys = [...rec.cache.entries()]
+      .sort(
+        (a, b) =>
+          Math.abs(b[1].idx - curIdx) - Math.abs(a[1].idx - curIdx)
+      )
+      .map(([k]) => k);
+    while (rec.cache.size > this.MAX_CACHE && keys.length) {
+      this._dropEntry(rec, keys.shift());
+    }
+  },
+
+  // Across tabs there is no such proxy -- index distance between two different
+  // tabs means nothing -- so fall back to least-recently-touched tab first, and
+  // never evict from the tab we are currently in.
+  _evictGlobal(state, keepRec) {
+    let total = 0;
+    for (const rec of state.caches.values()) {
+      total += rec.cache.size;
+    }
+    if (total <= this.MAX_TOTAL) {
+      return;
+    }
+    const recs = [...state.caches.values()]
+      .filter(r => r !== keepRec && r.cache.size)
+      .sort((a, b) => a.used - b.used);
+    for (const rec of recs) {
+      for (const key of [...rec.cache.keys()]) {
+        if (total <= this.MAX_TOTAL) {
+          return;
+        }
+        this._dropEntry(rec, key);
+        total--;
+        state.evictions = (state.evictions || 0) + 1;
+      }
     }
   },
 
@@ -309,11 +521,28 @@ var SwipeAnim = {
     if (idx < 0) {
       return;
     }
+    // Resolved BEFORE the await, for the same reason idxOverride exists: a
+    // navigation landing mid-capture can truncate forward history and shift
+    // what getEntryAtIndex(idx) refers to. Both the tab and the entry are
+    // pinned here, so the pixels can only ever be filed against the tab and
+    // history entry they were actually taken from -- even if the user switches
+    // tabs while drawSnapshot is in flight.
+    const rec = this._cacheFor(state, browser);
+    const key = this._entryKey(browser, idx);
+    if (!rec || !key) {
+      return;
+    }
     const r = browser.getBoundingClientRect();
     if (!r.width || !r.height) {
       return;
     }
-    const url = browser.currentURI?.spec;
+    // Taken from the history entry, NOT from browser.currentURI. On the
+    // pre-navigation refresh currentURI can already have moved to the page we
+    // are heading to while these pixels are still the page we are leaving --
+    // storing that would make _buildIncoming's cross-check report a mismatch
+    // for a perfectly good snapshot. Reading the same source both sides read
+    // means a mismatch can only ever mean the entry itself changed identity.
+    const url = this._entryURL(browser, idx) || browser.currentURI?.spec;
     const t0 = win.performance.now();
 
     // The rect MUST be null. drawSnapshot's rect is in DOCUMENT coordinates,
@@ -355,13 +584,14 @@ var SwipeAnim = {
       // evidence that any entry we already hold for this index is out of date.
       // Mark it rather than pretending it is good: _buildIncoming refuses to
       // animate to a marked entry and hands the gesture to the stock arrows.
-      const stalePrev = state.cache.get(idx);
+      const stalePrev = rec.cache.get(key);
       if (stalePrev) {
         stalePrev.stale = true;
         state.staleMarks = (state.staleMarks || 0) + 1;
       }
       state.captureFails = (state.captureFails || 0) + 1;
       state.lastCaptureFail = {
+        tab: rec.id,
         idx,
         url,
         error: String(e && (e.name || e.message || e)),
@@ -370,36 +600,20 @@ var SwipeAnim = {
       };
       return;
     }
-    const prev = state.cache.get(idx);
-    if (prev) {
-      try {
-        prev.bitmap.close();
-      } catch (e) {}
-    }
-    state.cache.set(idx, {
+    this._dropEntry(rec, key);
+    rec.cache.set(key, {
       bitmap: bmp,
       w: bmp.width,
       h: bmp.height,
       cssW: r.width,
       cssH: r.height,
       zoom,
+      idx,
       url,
       ms: +(win.performance.now() - t0).toFixed(1),
     });
-    if (state.cache.size > this.MAX_CACHE) {
-      const cur = idx;
-      const keys = [...state.cache.keys()].sort(
-        (a, b) => Math.abs(b - cur) - Math.abs(a - cur)
-      );
-      while (state.cache.size > this.MAX_CACHE) {
-        const k = keys.shift();
-        const e = state.cache.get(k);
-        try {
-          e.bitmap.close();
-        } catch (err) {}
-        state.cache.delete(k);
-      }
-    }
+    this._evictTab(rec, idx);
+    this._evictGlobal(state, rec);
   },
 
   _onStart(state) {
@@ -422,8 +636,15 @@ var SwipeAnim = {
     this._syncPixelSize(state);
 
     const rect = browser.getBoundingClientRect();
+    const idx = this._shIndex(browser);
     state.gesture = {
-      idx: this._shIndex(browser),
+      idx,
+      // Pinned for the life of the gesture. Every later lookup goes through
+      // these rather than re-reading selectedBrowser, so a tab switch mid-flight
+      // cannot repoint the commit animation at another tab's snapshots.
+      browser,
+      rec: this._cacheFor(state, browser),
+      key: this._entryKey(browser, idx),
       width: rect.width,
       height: rect.height,
       isLTR: anim.isLTR,
@@ -471,9 +692,11 @@ var SwipeAnim = {
     }
 
     state.gestureLog = state.gestureLog || [];
+    const entries = [...(state.gesture.rec?.cache.values() || [])];
     state.gestureLog.unshift({
       at: new Date().toTimeString().slice(0, 8),
       outcome: "started",
+      tab: state.gesture.rec?.id ?? null,
       currentIdx: state.gesture.idx,
       canGoBack: state.gesture.canGoBack,
       canGoForward: state.gesture.canGoForward,
@@ -481,17 +704,18 @@ var SwipeAnim = {
       fwdHasSnapshot: !!state.incomings.fwd?.hasSnapshot,
       backStale: !!state.incomings.back?.stale,
       fwdStale: !!state.incomings.fwd?.stale,
-      cachedKeys: [...state.cache.keys()].sort((a, b) => a - b),
+      backMismatch: !!state.incomings.back?.mismatch,
+      fwdMismatch: !!state.incomings.fwd?.mismatch,
+      // Indices held for THIS tab only.
+      cachedIdx: entries.map(v => v.idx).sort((a, b) => a - b),
       // Entries we know are out of date: a refresh was attempted and lost the
       // race with the navigation. Swiping to one of these takes the arrows.
-      staleKeys: [...state.cache.entries()]
-        .filter(([, v]) => v.stale)
-        .map(([k]) => k),
+      staleIdx: entries.filter(v => v.stale).map(v => v.idx),
       viewportWidth: Math.round(state.gesture.width),
       // A cached bitmap taken at a different window size is a stale snapshot.
-      staleSizes: [...state.cache.entries()]
-        .filter(([, v]) => Math.abs((v.cssW || 0) - state.gesture.width) > 2)
-        .map(([k, v]) => ({ idx: k, capturedAtWidth: Math.round(v.cssW || 0) })),
+      staleSizes: entries
+        .filter(v => Math.abs((v.cssW || 0) - state.gesture.width) > 2)
+        .map(v => ({ idx: v.idx, capturedAtWidth: Math.round(v.cssW || 0) })),
     });
     state.gestureLog.length = Math.min(state.gestureLog.length, 10);
   },
@@ -554,13 +778,32 @@ var SwipeAnim = {
     const win = state.win;
     const g = state.gesture;
     const target = goingBack ? g.idx - 1 : g.idx + 1;
-    const entry = state.cache.get(target);
+    const key = this._entryKey(g.browser, target);
+    const entry = key ? g.rec?.cache.get(key) : null;
     // An entry _capture marked stale is a picture of the right page at the
     // wrong moment -- animating to it promises a destination that is not what
     // will actually appear. Treat it as no snapshot at all so the gesture falls
     // back to the arrows, the same as a page we have never seen.
     const stale = !!entry?.stale && g.cfg.staleFallback;
-    const usable = !!entry && !stale;
+    // Belt and braces over the entry-ID key, and the only real guard on the
+    // index fallback path. A mismatch here means the bitmap is of a different
+    // PAGE, not merely a different moment, so unlike `stale` it disqualifies
+    // the entry regardless of swipeAnim.staleFallback.
+    let mismatch = false;
+    if (entry && g.cfg.urlCheck) {
+      const want = this._entryURL(g.browser, target);
+      mismatch = !!want && !!entry.url && want !== entry.url;
+      if (mismatch) {
+        state.urlMismatches = (state.urlMismatches || 0) + 1;
+        state.lastUrlMismatch = {
+          at: new Date().toTimeString().slice(0, 8),
+          idx: target,
+          want,
+          have: entry.url,
+        };
+      }
+    }
+    const usable = !!entry && !stale && !mismatch;
     // back uncovers (incoming below), forward covers (incoming above)
     const container = goingBack ? state.underlay : state.overlay;
 
@@ -582,7 +825,15 @@ var SwipeAnim = {
       container.appendChild(card);
     }
 
-    const rec = { card, dim, goingBack, hasSnapshot: usable, target, stale };
+    const rec = {
+      card,
+      dim,
+      goingBack,
+      hasSnapshot: usable,
+      target,
+      stale,
+      mismatch,
+    };
     state.incomings[goingBack ? "back" : "fwd"] = rec;
     return rec;
   },
@@ -605,6 +856,9 @@ var SwipeAnim = {
     }
     state.frames.push(win.performance.now());
     g.lastVal = aVal;
+    if (g.rec) {
+      g.rec.used = ++state.tick;
+    }
 
     // Diagnostic: SwipeTracker pins the reported delta to exactly
     // 0.999 * kSwipeSuccessThreshold (0.24975) when it wants to suppress the
@@ -615,7 +869,7 @@ var SwipeAnim = {
       state.lastPinnedAt = new Date().toTimeString().slice(0, 8);
     }
 
-    const browser = win.gBrowser.selectedBrowser;
+    const browser = g.browser;
     const ltr = g.isLTR;
     const goingBack = ((aVal > 0 && ltr) || (aVal < 0 && !ltr)) && g.canGoBack;
     const goingFwd = ((aVal > 0 && !ltr) || (aVal < 0 && ltr)) && g.canGoForward;
@@ -664,7 +918,11 @@ var SwipeAnim = {
         aVal,
         goingBack,
         inc.target,
-        inc.stale ? "stale-snapshot" : "no-snapshot"
+        inc.mismatch
+          ? "url-mismatch"
+          : inc.stale
+          ? "stale-snapshot"
+          : "no-snapshot"
       );
       return;
     }
@@ -714,9 +972,12 @@ var SwipeAnim = {
       outcome: "delegated-to-arrows",
       reason: reason || "no-snapshot",
       dir: goingBack ? "back" : "fwd",
+      tab: g?.rec?.id ?? null,
       targetIdx,
       currentIdx: g ? g.idx : null,
-      cachedKeys: [...state.cache.keys()].sort((a, b) => a - b),
+      cachedIdx: [...(g?.rec?.cache.values() || [])]
+        .map(v => v.idx)
+        .sort((a, b) => a - b),
       viewportWidth: g ? Math.round(g.width) : null,
     });
     state.gestureLog.length = Math.min(state.gestureLog.length, 10);
@@ -744,7 +1005,7 @@ var SwipeAnim = {
     if (state.committing) {
       return; // stopAnimation and swipeEndEventReceived both land here
     }
-    const browser = win.gBrowser?.selectedBrowser;
+    const browser = g?.browser || win.gBrowser?.selectedBrowser;
 
     // Cancel path already animated itself: SwipeTracker::ProcessEvent calls
     // StartAnimating(eventAmount, 0.0) and springs back to 0 while emitting
@@ -780,7 +1041,7 @@ var SwipeAnim = {
   _runCommitAnimation(state) {
     const win = state.win;
     const g = state.gesture;
-    const browser = win.gBrowser.selectedBrowser;
+    const browser = g.browser;
     const dur = Math.max(
       80,
       Math.min(600, this._prefsNum(win, "swipeAnim.commitMs", 260))
@@ -809,7 +1070,9 @@ var SwipeAnim = {
 
     // Outgoing page: a snapshot of where we are leaving from, so it keeps
     // showing the OLD content while it slides away.
-    const outEntry = state.cache.get(g.idx);
+    // g.key, not a fresh _entryKey(g.idx): by now the navigation has already
+    // started and the index may no longer mean the entry we launched from.
+    const outEntry = g.key ? g.rec?.cache.get(g.key) : null;
     let outCanvas = null;
     if (outEntry) {
       const made = this._makeCard(state, outEntry);
@@ -853,7 +1116,7 @@ var SwipeAnim = {
           outCanvas.remove();
           state.commitOutCanvas = null;
         }
-        this._finishCommit(state);
+        this._finishCommit(state, browser);
       }
     };
     win.requestAnimationFrame(step);
@@ -861,9 +1124,9 @@ var SwipeAnim = {
 
   // Hold the destination snapshot until the live page has actually painted,
   // rather than guessing with a fixed delay.
-  _finishCommit(state) {
+  _finishCommit(state, aBrowser) {
     const win = state.win;
-    const browser = win.gBrowser?.selectedBrowser;
+    const browser = aBrowser || win.gBrowser?.selectedBrowser;
     const done = () => {
       if (!state.committing) {
         return;
@@ -916,10 +1179,42 @@ var SwipeAnim = {
     state.committing = false;
     state.delegating = false;
     this._teardown(state);
-    return {
-      reset: true,
-      cached: [...state.cache.keys()].sort((a, b) => a - b),
-    };
+    return { reset: true, cached: this._cacheDump(state) };
+  },
+
+  // One row per tab that holds snapshots. `tab` is our own sequence number;
+  // `label` is looked up live so a row can be tied back to a visible tab.
+  _cacheDump(state) {
+    const win = state.win;
+    const labels = new Map();
+    let curKey = null;
+    try {
+      curKey = win.gBrowser?.selectedBrowser?.permanentKey || null;
+      for (const tab of win.gBrowser?.tabs || []) {
+        const k = tab.linkedBrowser?.permanentKey;
+        if (k) {
+          labels.set(k, tab.label);
+        }
+      }
+    } catch (e) {}
+    return [...state.caches.values()]
+      .filter(rec => rec.cache.size)
+      .sort((a, b) => b.used - a.used)
+      .map(rec => ({
+        tab: rec.id,
+        label: labels.get(rec.key) ?? "(closed)",
+        selected: rec.key === curKey,
+        lastIdx: rec.lastIdx,
+        entries: [...rec.cache.entries()]
+          .sort((a, b) => a[1].idx - b[1].idx)
+          .map(([key, v]) => ({
+            idx: v.idx,
+            key,
+            url: v.url,
+            capturedAtWidth: Math.round(v.cssW || 0),
+            stale: !!v.stale,
+          })),
+      }));
   },
 
   // Snapshot of everything that could wedge a gesture. Read this when swipes
@@ -963,11 +1258,7 @@ var SwipeAnim = {
           }
         : null,
       historyIdx: browser ? this._shIndex(browser) : null,
-      cached: [...state.cache.entries()].map(([k, v]) => ({
-        idx: k,
-        capturedAtWidth: Math.round(v.cssW || 0),
-        stale: !!v.stale,
-      })),
+      cached: this._cacheDump(state),
       captureFails: state.captureFails || 0,
       lastCaptureFail: state.lastCaptureFail || null,
       // How often a capture failure landed on an entry we already held (so the
@@ -976,6 +1267,12 @@ var SwipeAnim = {
       // routinely, and only a scroll-driven recapture will fix it properly.
       staleMarks: state.staleMarks || 0,
       staleSkips: state.staleSkips || 0,
+      // Destination snapshot whose URL did not match the history entry it was
+      // filed against. Should stay 0; see stats() for the last one.
+      urlMismatches: state.urlMismatches || 0,
+      lastUrlMismatch: state.lastUrlMismatch || null,
+      // Snapshots dropped to stay under MAX_TOTAL across all tabs.
+      evictions: state.evictions || 0,
       // Swallowed exceptions. Non-empty here is the usual cause of "no animation".
       errors: state.errors || [],
       gestureLog: (state.gestureLog || []).slice(0, 6),
@@ -1069,13 +1366,11 @@ var SwipeAnim = {
     return {
       installed: true,
       cfg: this._prefs(win),
-      cacheEntries: [...state.cache.entries()].map(([k, v]) => ({
-        idx: k,
-        url: v.url,
-        px: `${v.w}x${v.h}`,
-        captureMs: v.ms,
-        stale: !!v.stale,
-      })),
+      cacheEntries: this._cacheDump(state),
+      cacheTotal: [...state.caches.values()].reduce(
+        (n, rec) => n + rec.cache.size,
+        0
+      ),
       lastGestureFrames: f.length,
       medianGap: sorted.length ? sorted[Math.floor(sorted.length / 2)] : null,
       maxGap: sorted.length ? sorted[sorted.length - 1] : null,
@@ -1088,6 +1383,9 @@ var SwipeAnim = {
       lastCaptureFail: state.lastCaptureFail || null,
       staleMarks: state.staleMarks || 0,
       staleSkips: state.staleSkips || 0,
+      urlMismatches: state.urlMismatches || 0,
+      lastUrlMismatch: state.lastUrlMismatch || null,
+      evictions: state.evictions || 0,
       gestureLog: state.gestureLog || [],
       trackerPrefs: {
         pixelSize: (() => { try { return Services.prefs.getFloatPref("widget.swipe.pixel-size"); } catch (e) { return null; } })(),

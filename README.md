@@ -144,14 +144,38 @@ supported way to run privileged JavaScript at startup:
   window and calls `SwipeAnim.install(window)`.
 - `swipe-anim.js` overrides the four `gHistorySwipeAnimation` entry points.
 
-Page imagery comes from `WindowGlobalParent.drawSnapshot()`, cached against the
-session history index of the entry it depicts — the same approach as Safari's
-`ViewSnapshotStore` and Chrome for Android's `NavigationEntryScreenshot`.
-Capture costs roughly 13–17 ms, runs asynchronously in the content process, and
-is never on the gesture's critical path.
+Page imagery comes from `WindowGlobalParent.drawSnapshot()` — the same approach
+as Safari's `ViewSnapshotStore` and Chrome for Android's
+`NavigationEntryScreenshot`. Capture costs roughly 13–17 ms, runs asynchronously
+in the content process, and is never on the gesture's critical path.
+
+**Snapshots are cached per tab, keyed by session history entry rather than by
+history index.** Indices are reused in two directions and neither one is
+survivable with an index-keyed cache: every tab has an index 2, so one flat map
+means swiping in one tab shows another tab's page; and within a single tab a new
+navigation truncates forward history, so a later page inherits an index a
+different page used to hold. `nsISHEntry.ID` identifies the entry itself, so a
+reused index simply misses the cache instead of returning the wrong picture.
+
+The ID is not used as a global key. Session restore reassigns IDs starting from
+`Date.now()` with its uniqueness set scoped to a single tab's restore, so two
+tabs restored in the same millisecond can hold equal IDs — harmless as long as
+each tab's snapshots live in their own map, which is the other reason the cache
+is per tab. Tabs are identified by `browser.permanentKey`, the handle that
+survives a remoteness switch.
+
+As a cross-check on the key — and as the only real guard on the fallback path
+where an entry ID cannot be read — the destination snapshot's URL is compared
+against the history entry's before animating to it. A mismatch means the bitmap
+is of a different *page* rather than merely a different moment, so unlike a
+stale snapshot it disqualifies the entry regardless of `swipeAnim.staleFallback`
+and the gesture falls back to the arrows.
 
 Snapshots are taken when a page settles after loading, when a navigation starts
-(to refresh the page being left behind), and at the start of every gesture. That
+(to refresh the page being left behind), when you switch to a tab, and at the
+start of every gesture. Only the selected tab is ever captured — `drawSnapshot()`
+on a backgrounded tab is not reliably a picture of anything — which is why
+switching to a tab schedules one. That
 last one is the reliable one: the page is still on screen and nothing is
 navigating, so it cannot lose a race. It is what the release animation slides
 off, and it leaves a correctly-scrolled entry behind for the return trip.
@@ -205,6 +229,7 @@ All read live from `about:config`.
 | `swipeAnim.fullTraverse` | `true` | Keeps `widget.swipe.pixel-size` matched to the viewport width (see below). |
 | `swipeAnim.positionalCommit` | `true` | Commit/cancel decided by where you release rather than by gesture velocity (see below). |
 | `swipeAnim.staleFallback` | `true` | Fall back to the arrows when the destination's snapshot is known to be out of date. Set to `false` to animate to it anyway, accepting that the scroll position may be wrong. |
+| `swipeAnim.urlCheck` | `true` | Cross-check a destination snapshot's URL against the history entry before animating to it. Turn off only if `stats().urlMismatches` climbs during ordinary browsing, which would mean the check is misfiring rather than catching anything. |
 
 ### Two Firefox internals worth knowing about
 
@@ -246,9 +271,14 @@ that were caught and swallowed, snapshot capture failures, and a log of recent
 gestures including which directions had a cached snapshot.
 
 If a destination page has no usable snapshot — never visited this session,
-evicted from the cache, or known to be out of date — that gesture falls back to
-Firefox's own arrow indicator rather than showing a blank or misleading card.
-`gestureLog` records which of those it was under `reason`.
+evicted from the cache, known to be out of date, or holding a URL that does not
+match the history entry — that gesture falls back to Firefox's own arrow
+indicator rather than showing a blank or misleading card. `gestureLog` records
+which of those it was under `reason`.
+
+`health().cached` and `stats().cacheEntries` list the cache one row per tab,
+with the tab's current title, so a snapshot can be tied back to the tab it
+belongs to.
 
 Two counters are worth watching if back-swipes fall back to the arrows more
 often than you would like:
@@ -268,8 +298,13 @@ animation that may show the wrong scroll position.
 
 - Linux/GTK only. The same entry points exist on macOS and Windows, but nothing
   here has been tested on either.
-- The snapshot cache holds six entries, evicting whichever is furthest from the
-  current position. Swiping to a page beyond that falls back to the arrows.
+- The snapshot cache holds four entries per tab, evicting whichever is furthest
+  from the current position, and twenty-four across the window, evicting from
+  the least recently used tab first. Swiping to a page beyond that falls back to
+  the arrows.
+- Only the selected tab is snapshotted, so a tab that navigates in the
+  background has nothing cached for the pages it passed through. Switching to it
+  captures where it now is, not where it has been.
 - A snapshot taken at a different window size is anchored top-left and cropped
   rather than stretched, so a resized window may show a filled strip along an
   edge. The fill colour is sampled from the snapshot to blend in.
