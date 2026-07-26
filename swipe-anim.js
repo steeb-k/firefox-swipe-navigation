@@ -935,14 +935,17 @@ var SwipeAnim = {
     inc.card.style.visibility = "visible";
     inc.dim.style.visibility = "visible";
 
-    const shadow = g.cfg.shadow
-      ? `${edge * 10}px 0 26px rgba(0,0,0,0.55)`
-      : "";
+    // Shadow goes on the seam between the two pages, which is on opposite sides
+    // of the moving layer depending on which layer moves: the page being dragged
+    // off trails its shadow behind it (edge), while the page sliding in over the
+    // top pushes its shadow ahead of it (-edge).
+    const shadow = mul =>
+      g.cfg.shadow ? `${mul * 10}px 0 26px rgba(0,0,0,0.55)` : "";
 
     if (goingBack) {
       // UNCOVER: previous page stationary underneath, current page slides off.
       browser.style.translate = `${dx.toFixed(2)}px 0px`;
-      browser.style.boxShadow = shadow;
+      browser.style.boxShadow = shadow(edge);
       inc.card.style.translate = `${(off * g.cfg.parallax).toFixed(2)}px 0px`;
       inc.dim.style.translate = inc.card.style.translate;
       inc.dim.style.opacity = ((1 - t) * g.cfg.dim).toFixed(3);
@@ -951,7 +954,7 @@ var SwipeAnim = {
       browser.style.translate = `${(dx * g.cfg.parallax).toFixed(2)}px 0px`;
       browser.style.boxShadow = "";
       inc.card.style.translate = `${off.toFixed(2)}px 0px`;
-      inc.card.style.boxShadow = shadow;
+      inc.card.style.boxShadow = shadow(-edge);
       inc.dim.style.translate = "0px";
       inc.dim.style.opacity = (t * g.cfg.dim).toFixed(3);
     }
@@ -1034,10 +1037,20 @@ var SwipeAnim = {
 
   // The live <browser> is already navigating, so continuing to slide IT would
   // show its content change from the old page to the new one mid-flight. Instead
-  // hand the whole commit phase to snapshots layered above a stationary browser:
-  //   overlay = [ destination snapshot at 0 ] [ outgoing snapshot sliding off ]
+  // hand the whole commit phase to snapshots layered above a stationary browser,
+  // stacked bottom-to-top in the same order the drag had them:
+  //   back (UNCOVER): [ destination at rest ] [ dim ] [ outgoing sliding off ]
+  //   forward (COVER): [ outgoing at rest ] [ dim ] [ destination sliding in ]
   // then drop the overlay once the live page has painted. This also removes the
   // white flash that used to happen between teardown and first paint.
+  //
+  // The moving layer differs by direction and that is the whole point: an
+  // uncover moves the OUTGOING page, a cover moves the INCOMING one. Sliding the
+  // outgoing page off for a forward commit -- as this used to do unconditionally
+  // -- plays the back animation on a forward gesture: the destination jumps from
+  // wherever the finger left it straight to 0 while the current page jerks
+  // sideways to meet it. Invisible on a slow full-width drag (both jumps are
+  // ~0), violent on a quick flick released at 30%.
   _runCommitAnimation(state) {
     const win = state.win;
     const g = state.gesture;
@@ -1056,20 +1069,13 @@ var SwipeAnim = {
       dx = Math.sign(dx) * g.width;
     }
     const edge = dx > 0 ? -1 : 1;
-
-    // Destination snapshot must sit ABOVE the browser now, because the browser
-    // still shows the outgoing page until navigation paints.
-    if (inc) {
-      inc.dim.style.opacity = 0;
-      inc.dim.style.visibility = "hidden";
-      state.overlay.appendChild(inc.card);
-      inc.card.style.translate = "0px";
-      inc.card.style.visibility = "visible";
-      inc.card.style.boxShadow = "";
-    }
+    // Same t/off the last _onUpdate used, so every layer starts the commit
+    // exactly where the finger left it. Any mismatch here IS the snap.
+    const t = Math.min(Math.abs(dx) / g.width, 1);
+    const off = edge * g.width * (1 - t);
 
     // Outgoing page: a snapshot of where we are leaving from, so it keeps
-    // showing the OLD content while it slides away.
+    // showing the OLD content whether it slides away or is covered over.
     // g.key, not a fresh _entryKey(g.idx): by now the navigation has already
     // started and the index may no longer mean the entry we launched from.
     const outEntry = g.key ? g.rec?.cache.get(g.key) : null;
@@ -1078,17 +1084,46 @@ var SwipeAnim = {
       const made = this._makeCard(state, outEntry);
       outCanvas = made.card;
       outCanvas.style.visibility = "visible";
-      state.overlay.appendChild(outCanvas);
       state.commitOutCanvas = outCanvas;
+    }
+
+    // Re-stack into the overlay. The destination snapshot has to move above the
+    // browser even on the back path, because the browser still shows the
+    // outgoing page until navigation paints.
+    const stack = goingBack
+      ? [inc?.card, inc?.dim, outCanvas]
+      : [outCanvas, inc?.dim, inc?.card];
+    for (const node of stack) {
+      if (node) {
+        state.overlay.appendChild(node);
+      }
+    }
+    if (inc) {
+      inc.card.style.visibility = "visible";
+      inc.dim.style.visibility = "visible";
+      inc.dim.style.translate = "0px";
     }
 
     // Browser goes home immediately; it is fully covered by the overlay.
     browser.style.translate = "0px";
     browser.style.boxShadow = "";
 
-    const startDx = dx;
-    const endDx = -edge * g.width; // finish travelling the way it was going
-    const target = outCanvas || browser;
+    // Who moves, from where, to where -- and who wears the shadow.
+    //   uncover: outgoing travels on out; destination eases in from parallax.
+    //   cover:   destination completes its travel to 0; outgoing settles home.
+    const mover = goingBack ? outCanvas || browser : inc?.card;
+    const settler = goingBack ? inc?.card : outCanvas || browser;
+    const moverFrom = goingBack ? dx : off;
+    const moverTo = goingBack ? -edge * g.width : 0;
+    const settlerFrom = goingBack ? off * g.cfg.parallax : dx * g.cfg.parallax;
+    // Leading edge of the moving layer: for an uncover it is the trailing side
+    // of the page being dragged off (edge), for a cover it is the seam the
+    // incoming page pushes ahead of it (-edge).
+    const shadowX = (goingBack ? edge : -edge) * 10;
+    // Dim rides the underneath page: it lifts as a back destination is revealed
+    // and deepens as a forward destination covers.
+    const dimFrom = (goingBack ? 1 - t : t) * g.cfg.dim;
+    const dimTo = goingBack ? 0 : g.cfg.dim;
     const shadowOn = g.cfg.shadow;
     let startTime = null;
 
@@ -1101,13 +1136,20 @@ var SwipeAnim = {
       }
       const p = Math.min((now - startTime) / dur, 1);
       const e = 1 - Math.pow(1 - p, 3); // ease-out cubic
-      const cur = startDx + (endDx - startDx) * e;
-      target.style.translate = `${cur.toFixed(2)}px 0px`;
-      if (shadowOn && target === outCanvas) {
-        target.style.boxShadow = `${edge * 10}px 0 26px rgba(0,0,0,${(
-          0.55 *
-          (1 - e)
-        ).toFixed(3)})`;
+      if (mover) {
+        mover.style.translate = `${(
+          moverFrom +
+          (moverTo - moverFrom) * e
+        ).toFixed(2)}px 0px`;
+        mover.style.boxShadow = shadowOn
+          ? `${shadowX}px 0 26px rgba(0,0,0,${(0.55 * (1 - e)).toFixed(3)})`
+          : "";
+      }
+      if (settler) {
+        settler.style.translate = `${(settlerFrom * (1 - e)).toFixed(2)}px 0px`;
+      }
+      if (inc) {
+        inc.dim.style.opacity = (dimFrom + (dimTo - dimFrom) * e).toFixed(3);
       }
       if (p < 1) {
         win.requestAnimationFrame(step);
