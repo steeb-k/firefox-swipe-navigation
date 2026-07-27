@@ -2,14 +2,12 @@
 
 Safari-style 1:1 back/forward swipe animations for Firefox on Linux.
 
-[![A two-finger swipe caught mid-gesture: the profile page uncovering on the left while the repository page slides off to the right, two dots marking the fingers on the trackpad](https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/assets/poster.png)](https://steeb-k.github.io/firefox-swipe-navigation/demo.mp4)
+<video src="https://github.com/user-attachments/assets/b4e8654e-5ef2-4e27-807b-300b73f6d8fc" controls muted></video>
 
-Swiping back and forth, in real time — the image above links to a
-[26-second video](https://steeb-k.github.io/firefox-swipe-navigation/demo.mp4).
-The previous page sits still underneath while the current one slides off it,
-tracking the gesture pixel for pixel, and a page scrolled halfway down comes
-back exactly where it was left. The two dots stand in for the fingers on the
-trackpad — `swipeAnim.fingerDots`, off by default.
+Swiping back and forth, in real time. The previous page sits still underneath
+while the current one slides off it, tracking the gesture pixel for pixel, and a
+page scrolled halfway down comes back exactly where it was left. The two dots
+stand in for the fingers on the trackpad.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh | bash
