@@ -1,4 +1,5 @@
-// 1:1 swipe navigation animation for Firefox (Linux/GTK), pure chrome JS.
+// 1:1 swipe navigation animation for Firefox (Linux/GTK, Windows, macOS),
+// pure chrome JS.
 // Loaded into a browser window scope via Services.scriptloader.loadSubScript.
 // Entry point: SwipeAnim.install(window) / SwipeAnim.uninstall(window)
 //
@@ -15,6 +16,22 @@ var SwipeAnim = {
   // caps the whole window and evicts from least-recently-touched tabs first.
   MAX_CACHE: 4,
   MAX_TOTAL: 24,
+
+  _isMac() {
+    try {
+      return Services.appinfo.OS === "Darwin";
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Gecko ships widget.swipe.pixel-size at 550 on macOS and 1100 everywhere
+  // else (StaticPrefList.yaml, #if defined(XP_MACOSX)). Only matters as the
+  // value read back when the pref has never been set: fullTraverse overwrites
+  // it at the start of every gesture.
+  _pixelSizeDefault() {
+    return this._isMac() ? 550 : 1100;
+  },
 
   // Tunables. Read live from prefs so they can be changed in about:config
   // without editing this file.
@@ -46,7 +63,7 @@ var SwipeAnim = {
       staleFallback: b("swipeAnim.staleFallback", true),
       urlCheck: b("swipeAnim.urlCheck", true),
       fingerDots: b("swipeAnim.fingerDots", false),
-      pixelSize: f("widget.swipe.pixel-size", 1100),
+      pixelSize: f("widget.swipe.pixel-size", this._pixelSizeDefault()),
     };
   },
 
@@ -102,9 +119,15 @@ var SwipeAnim = {
   // widget.swipe.pixel-size is the denominator SwipeTracker.cpp divides finger
   // travel by, and mGestureAmount is clamped to [-1, 1] by ClampToAllowedRange.
   // So the page can never travel further than pixel-size CSS px. Its default
-  // (1100 on Linux) is narrower than most viewports, which strands the page
-  // partway across. Setting it to the viewport width is the single value where
-  // 1:1 tracking and a complete traverse are both true.
+  // (1100 on Linux, 550 on macOS) is narrower than most viewports, which
+  // strands the page partway across. Setting it to the viewport width is the
+  // single value where 1:1 tracking and a complete traverse are both true.
+  //
+  // Which is why this is NOT scaled per platform, tempting as the differing
+  // defaults make it look. The preference is doing two jobs at once -- it sets
+  // the tracking ratio and, because of that clamp, caps the travel -- so any
+  // fraction of the viewport width buys sensitivity by making a full traverse
+  // impossible, and the page sticks at exactly that fraction of the screen.
   _syncPixelSize(state) {
     return this._syncTrackerPrefs(state);
   },
@@ -132,6 +155,30 @@ var SwipeAnim = {
       origFns: {},
     };
     win.__swipeAnimState = state;
+
+    // macOS is the one platform that can turn the whole feature off underneath
+    // us. gHistorySwipeAnimation._isSupported() gates itself on the
+    // (-moz-swipe-animation-enabled) media feature, which LookAndFeel hardcodes
+    // to true on GTK and Windows but on macOS reports
+    // NSEvent.isSwipeTrackingFromScrollEventsEnabled -- System Settings >
+    // Trackpad > More Gestures > Swipe between pages. Set to three fingers or
+    // off, macOS never sends the continuous gesture at all, so this installs
+    // perfectly and visibly does nothing. Worth recording rather than leaving
+    // someone to guess.
+    state.swipeGestureAvailable = (() => {
+      try {
+        return win.matchMedia("(-moz-swipe-animation-enabled)").matches;
+      } catch (e) {
+        return null;
+      }
+    })();
+    if (state.swipeGestureAvailable === false) {
+      win.console.warn(
+        "[swipe-anim] installed, but the OS is not sending continuous swipe " +
+          "gestures. On macOS set System Settings > Trackpad > More Gestures > " +
+          "Swipe between pages to a two-finger option."
+      );
+    }
 
     const anim = win.gHistorySwipeAnimation;
     if (!anim) {
@@ -1447,6 +1494,9 @@ var SwipeAnim = {
       String(anim?.[fn] || "").includes("HSA_") ? "STOCK" : "ours";
     return {
       installed: true,
+      // false means the OS is not sending continuous swipe gestures, so nothing
+      // below matters -- only reachable on macOS. See install().
+      swipeGestureAvailable: state.swipeGestureAvailable,
       overrides: {
         startAnimation: orig("startAnimation"),
         updateAnimation: orig("updateAnimation"),

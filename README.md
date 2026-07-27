@@ -1,6 +1,7 @@
 # firefox-swipe-navigation
 
-Safari-style 1:1 back/forward swipe animations for Firefox on Linux and Windows.
+Safari-style 1:1 back/forward swipe animations for Firefox on Linux, Windows and
+macOS.
 
 <video src="https://github.com/user-attachments/assets/b4e8654e-5ef2-4e27-807b-300b73f6d8fc" controls muted></video>
 
@@ -9,7 +10,7 @@ while the current one slides off it, tracking the gesture pixel for pixel, and a
 page scrolled halfway down comes back exactly where it was left. The two dots
 stand in for the fingers on the trackpad.
 
-On Linux:
+On Linux and macOS:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh | bash
@@ -21,10 +22,11 @@ On Windows, in PowerShell:
 irm https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.ps1 | iex
 ```
 
-Then quit Firefox completely and restart it. Requires Firefox 111+, and one
-privilege escalation — sudo on Linux, a UAC prompt on Windows. Both scripts ask
-for it themselves at the one step that needs it, so do **not** run either one
-elevated.
+Then quit Firefox completely and restart it. Requires Firefox 111+. On Linux and
+Windows it needs one privilege escalation — sudo, or a UAC prompt — which the
+scripts ask for themselves at the one step that needs it, so do **not** run
+either one elevated. On macOS it needs no escalation at all, and running it with
+`sudo` is actively wrong: see [macOS](#macos).
 
 It clones this repository — to `~/.local/share/firefox-swipe-navigation`, or
 `%LOCALAPPDATA%\firefox-swipe-navigation` — and runs the installer, which lists
@@ -74,18 +76,68 @@ extension.
   rewrote `gHistorySwipeAnimation` into the form this replaces, including the
   `updateAnimation(delta)` entry point everything here depends on. The installer
   refuses to touch anything older.
-- Linux/GTK or Windows. Touchpad swipe-to-navigate shipped on Linux in Firefox
-  106 (bug 1790580), so 111 is the binding constraint on both.
+- Linux/GTK, Windows or macOS. Touchpad swipe-to-navigate shipped on Linux in
+  Firefox 106 (bug 1790580), so 111 is the binding constraint everywhere.
 - Developed and verified against **Firefox 152**. Versions between 111 and 152
   should work but are untested.
 - A trackpad that produces two-finger horizontal pan gestures. On Windows that
   means a Precision Touchpad: the gesture arrives through Direct Manipulation
   rather than GTK, but reaches the same `SwipeTracker` and the same front-end
-  entry points.
+  entry points. macOS reaches it too — the Cocoa-native swipe path that used to
+  bypass `SwipeTracker` is gone from the tree.
 - Write access to the Firefox installation directory once — `sudo` on Linux, an
-  elevated shell on Windows. A per-user Firefox under `%LOCALAPPDATA%` is
-  writable as yourself, and the Windows installer will not ask for elevation it
-  does not need.
+  elevated shell on Windows, and on macOS neither. A per-user Firefox under
+  `%LOCALAPPDATA%` is writable as yourself, and the Windows installer will not
+  ask for elevation it does not need.
+
+### macOS
+
+Four things are specific to macOS, and the first two are the ones that bite.
+
+**The OS has to be sending the gesture.** *System Settings → Trackpad → More
+Gestures → Swipe between pages* must be **"Scroll left or right with two
+fingers"** or **"Swipe with two or three fingers"**. On the three-finger setting,
+or off, macOS sends no continuous swipe at all — Firefox navigates instantly with
+no animation, and this project is installed and inert. It is the one platform
+where that can happen: the `-moz-swipe-animation-enabled` media feature that
+`gHistorySwipeAnimation` gates itself on is hardcoded true on GTK and Windows,
+but on macOS reports `NSEvent.isSwipeTrackingFromScrollEventsEnabled`. Check it:
+
+```js
+SwipeAnim.health(window).swipeGestureAvailable
+```
+
+**Do not use `sudo`.** `/Applications/Firefox.app` belongs to whoever installed
+it, so there is nothing to escalate for. Worse, `Contents/Resources/removed-files`
+tells Firefox's updater to `rmdir Contents/Resources/defaults/`, and
+`RemoveDir::Prepare` treats a directory it cannot write as a *fatal* update
+error — so a root-owned `defaults/` inside a user-owned bundle breaks every
+future Firefox update. The installer creates those directories as the bundle's
+owner for exactly this reason.
+
+If the write is refused anyway, that is **App Management**, not permissions:
+macOS requires it to modify another app's bundle, `sudo` does not grant it, and a
+denial is silent. Enable your terminal under *System Settings → Privacy &
+Security → App Management*, then quit and reopen it — a running process does not
+pick up the grant. The installer detects this case and names the application.
+
+**Launch Firefox once before installing.** Modifying a bundle that still carries
+`com.apple.quarantine` is the documented route to "Firefox is damaged and can't
+be opened"; launching it once clears the flag. The installer refuses on a
+quarantined bundle rather than risk it.
+
+**The code signature.** Writing into `Contents/Resources` breaks the seal, so
+`codesign --verify` and `spctl --assess` will report added resources from here
+on. Firefox still launches — Gatekeeper enforces this on a quarantined app, and
+this is Mozilla's own documented way to deploy autoconfig on macOS. Do not
+re-sign to "fix" it: an ad-hoc signature replaces Mozilla's Developer ID, drops
+the entitlements Firefox needs under the hardened runtime, and breaks the
+same-team exemption its updater relies on.
+
+Firefox's own updates **keep** these files: the macOS updater copies the whole
+bundle to a staging directory with an empty skip-list before applying the update.
+`brew upgrade --cask firefox` replaces the bundle wholesale and does not — re-run
+the installer after one.
 
 ## Install
 
@@ -111,7 +163,9 @@ finds with each version, so you can pick one or several. On Linux that is
 `/usr/lib`, `/usr/lib64`, `/usr/local/lib`, `/opt`, Snap, Flatpak and a few
 paths under your home directory; on Windows it is whatever Firefox recorded
 under `HKLM\SOFTWARE\Mozilla` and `HKCU\SOFTWARE\Mozilla`, plus a sweep of
-Program Files and `%LOCALAPPDATA%` for an install that never registered itself:
+Program Files and `%LOCALAPPDATA%` for an install that never registered itself;
+on macOS it asks Spotlight for Mozilla bundles — the local equivalent of that
+registry lookup — and sweeps `/Applications` and `~/Applications` as a backstop:
 
 ```
 Detected Firefox installations:
@@ -129,6 +183,14 @@ Or skip the prompt entirely:
 sudo ./install.sh /path/to/firefox /another/firefox   # explicit paths
 SWIPE_ASSUME_ALL=1 sudo ./install.sh                  # every detected install
 SWIPE_EXTRA_DIRS="/custom/path" sudo ./install.sh     # widen the search
+./install.sh --list                                   # show, change nothing
+```
+
+On macOS, drop the `sudo` and name the bundle — either the `.app` or the
+`Contents/Resources` inside it works:
+
+```sh
+./install.sh /Applications/Firefox.app
 ```
 
 The Windows installer takes the same three as switches, and adds two of its own:
@@ -186,7 +248,7 @@ keep or drop them.
 
 ```sh
 cd ~/.local/share/firefox-swipe-navigation   # wherever you cloned it
-sudo ./uninstall.sh
+sudo ./uninstall.sh                          # on macOS, without the sudo
 ```
 
 ```powershell
@@ -331,12 +393,21 @@ Both of these are why the defaults above exist.
 **`widget.swipe.pixel-size` bounds how far the page can travel.**
 `SwipeTracker` divides finger displacement by this preference and clamps the
 result to `[-1, 1]`, so the page can never move further than `pixel-size` CSS
-pixels. The default is `1100` on both platforms, narrower than most viewports,
-which leaves the page stranded partway across the screen. Setting it to the viewport width is
+pixels. The default is `1100` on Linux and Windows and `550` on macOS, both
+narrower than most viewports, which leaves the page stranded partway across the
+screen. Setting it to the viewport width is
 the one value where 1:1 tracking and a complete traverse are simultaneously
 true, and `swipeAnim.fullTraverse` keeps it there as the window resizes. A side
 effect is that the commit threshold — a hardcoded 25% in `SwipeTracker.cpp` —
 becomes 25% of the window width rather than a fixed distance.
+
+Mozilla's smaller macOS default is worth knowing about but does not mean macOS
+wants a different value from this project: `pixel-size` is not a sensitivity
+knob. Because the delta is clamped to `[-1, 1]` and the page moves by
+`delta × pixel-size`, that preference is simultaneously the scale factor *and*
+the furthest the page can ever travel. Anything below the viewport width strands
+the page partway across the screen no matter how far the gesture goes. The
+viewport width is the only value that satisfies both, on all three platforms.
 
 **Reversing direction makes Firefox report a deliberately false position.**
 When `ComputeSwipeSuccess()` decides a swipe will fail, `ProcessEvent` clamps the
@@ -389,8 +460,18 @@ animation that may show the wrong scroll position.
 
 ## Known limitations
 
-- macOS is untested. The same entry points exist there, but nothing here has
-  been run on it.
+- The macOS support has been verified on one machine — Firefox 152.0.6 on a
+  MacBook Pro (M2, macOS 26) with the built-in trackpad, at 2× display scaling.
+  What was checked there specifically: the gesture arrives with continuous
+  deltas as it does on GTK; the page tracks the fingers 1:1 and traverses the
+  full window; reversing mid-gesture stays positional rather than jumping; and
+  install, uninstall and re-install leave the app bundle exactly as they found
+  it. An external display, a Magic Mouse and macOS versions before 26 have not
+  been exercised.
+- A conventional wheel mouse never produces a swipe on macOS: its scroll becomes
+  a `ScrollWheelInput` rather than a `PanGestureInput`, so it never reaches
+  `SwipeTracker`. A Magic Mouse does, gated by its own *Mouse → More Gestures*
+  setting; that path is untested here.
 - The Windows support is newer than the Linux support and has been verified on
   one machine — Firefox 152 ARM64 on Windows 11, at 1.25× display scaling, with
   a Precision Touchpad. What was checked there specifically: the gesture stream

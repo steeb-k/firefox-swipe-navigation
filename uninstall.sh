@@ -18,7 +18,10 @@ source "$HERE/lib.sh"
 BACKUP_ROOT="${SWIPE_BACKUP_ROOT:-$HERE/backups}"
 
 if (($# > 0)); then
-  SWIPE_SELECTED=("$@")
+  SWIPE_SELECTED=()
+  for arg in "$@"; do
+    SWIPE_SELECTED+=("$(swipe_normalize_dir "$arg")")
+  done
 else
   swipe_choose_installs uninstall "" || exit 1
 fi
@@ -26,7 +29,7 @@ fi
 echo
 echo "About to remove swipe navigation from:"
 for d in "${SWIPE_SELECTED[@]}"; do
-  echo "  $d"
+  echo "  $(swipe_display_dir "$d")"
 done
 echo
 if [[ -z "${SWIPE_ASSUME_ALL:-}" && -r /dev/tty ]]; then
@@ -54,8 +57,9 @@ uninstall_one() {
   local cfg="$ff_dir/mozilla.cfg"
   local pref="$ff_dir/defaults/pref/local-settings.js"
 
-  if [[ ! -w "$ff_dir" ]]; then
-    echo "SKIP $ff_dir (not writable; re-run with sudo)" >&2
+  if ! swipe_probe_writable "$ff_dir"; then
+    echo "SKIP $(swipe_display_dir "$ff_dir") (not writable)" >&2
+    swipe_explain_unwritable "$ff_dir"
     return 1
   fi
 
@@ -67,6 +71,7 @@ uninstall_one() {
     backup=$(dirname "$manifest")
     echo "  using manifest $manifest"
     local line path orig
+    local made=()
     while IFS= read -r line; do
       case "$line" in
         added=* | replaced=*)
@@ -83,8 +88,28 @@ uninstall_one() {
             echo "  WARNING: no backup for pre-existing $path; leaving it alone" >&2
           fi
           ;;
+        mkdir=*)
+          made+=("${line#*=}")
+          ;;
       esac
     done < "$manifest"
+
+    # Directories this project created, which on macOS means defaults/ and
+    # defaults/pref inside the app bundle. Deepest first, and only while empty:
+    # rmdir rather than rm -r, so anything that turned up in the meantime -- a
+    # second autoconfig deployment, say -- stops the removal instead of going
+    # with it.
+    local i
+    for ((i = ${#made[@]} - 1; i >= 0; i--)); do
+      path="${made[$i]}"
+      if [[ -d "$path" ]]; then
+        if rmdir "$path" 2>/dev/null; then
+          echo "  removed created directory $path"
+        else
+          echo "  leaving $path (not empty)"
+        fi
+      fi
+    done
   else
     # No manifest: only touch files that carry our marker, never anything else.
     echo "  no manifest found; removing marked files only"
@@ -100,7 +125,17 @@ uninstall_one() {
     fi
   fi
 
-  echo "OK   $ff_dir"
+  # Firefox ships no defaults/ inside the bundle on macOS, so an empty one can
+  # only be ours -- which makes this safe without a manifest saying so, and
+  # covers the case a manifest cannot: install twice and only the first run
+  # recorded creating the directories, but it is the second run's manifest that
+  # the uninstaller finds.
+  if [[ "$SWIPE_OS" == Darwin ]]; then
+    rmdir "$ff_dir/defaults/pref" 2>/dev/null && echo "  removed $ff_dir/defaults/pref"
+    rmdir "$ff_dir/defaults" 2>/dev/null && echo "  removed $ff_dir/defaults"
+  fi
+
+  echo "OK   $(swipe_display_dir "$ff_dir")"
   return 0
 }
 
