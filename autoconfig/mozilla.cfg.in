@@ -2,14 +2,20 @@
 // firefox-swipe-navigation-marker
 // Loader for the 1:1 swipe navigation animation.
 //
-// install.sh substitutes @PAYLOAD_PATH@ and writes the result to
+// The installer substitutes @PAYLOAD_URL@ and writes the result to
 // <firefox-install-dir>/mozilla.cfg. This file stays deliberately small: it only
 // loads the real payload, so you can edit swipe-anim.js and restart Firefox
 // without needing root again.
+//
+// The substitution is a complete file: URL rather than a bare path because the
+// two platforms spell one differently: "file:///usr/share/..." on Linux against
+// "file:///C:/Users/..." on Windows, where the drive letter takes the place of
+// the leading slash. Each installer builds the URL its own way and this file
+// stays neutral.
 
 try {
   (function () {
-    const PAYLOAD_URL = "file://@PAYLOAD_PATH@";
+    const PAYLOAD_URL = "@PAYLOAD_URL@";
 
     const svc =
       (typeof Services !== "undefined" && Services) || globalThis.Services;

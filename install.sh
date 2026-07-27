@@ -95,8 +95,10 @@ install_one() {
     fi
   done
 
-  # Bake the payload's absolute path into the loader.
-  sed "s|@PAYLOAD_PATH@|$PAYLOAD|g" "$TEMPLATE" > "$backup/mozilla.cfg.generated"
+  # Bake the payload's absolute path into the loader, as a file: URL. A POSIX
+  # path is already absolute-rooted, so file:// plus the leading slash of the
+  # path is the required three.
+  sed "s|@PAYLOAD_URL@|file://$PAYLOAD|g" "$TEMPLATE" > "$backup/mozilla.cfg.generated"
   install -m 0644 "$backup/mozilla.cfg.generated" "$target_cfg"
   install -m 0644 "$PREFS_SRC" "$target_pref"
 

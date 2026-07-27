@@ -1,6 +1,6 @@
 # firefox-swipe-navigation
 
-Safari-style 1:1 back/forward swipe animations for Firefox on Linux.
+Safari-style 1:1 back/forward swipe animations for Firefox on Linux and Windows.
 
 <video src="https://github.com/user-attachments/assets/b4e8654e-5ef2-4e27-807b-300b73f6d8fc" controls muted></video>
 
@@ -9,26 +9,43 @@ while the current one slides off it, tracking the gesture pixel for pixel, and a
 page scrolled halfway down comes back exactly where it was left. The two dots
 stand in for the fingers on the trackpad.
 
+On Linux:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh | bash
 ```
 
-Then quit Firefox completely and restart it. Requires Firefox 111+ on Linux/GTK,
-and sudo once — the script asks for it itself, so do **not** run it under sudo.
+On Windows, in PowerShell:
 
-It clones this repository to `~/.local/share/firefox-swipe-navigation` and runs
-`install.sh`, which lists the Firefox installations it found and asks which to
-install into. The checkout is permanent and yours: `swipe-anim.js` stays there
-and is re-read every time a window opens, so you can edit it without root.
-Re-run the same line any time to update.
+```powershell
+irm https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.ps1 | iex
+```
 
-If piping a script to a shell makes you uneasy — reasonably, since it calls
-sudo — read it first and run it separately:
+Then quit Firefox completely and restart it. Requires Firefox 111+, and one
+privilege escalation — sudo on Linux, a UAC prompt on Windows. Both scripts ask
+for it themselves at the one step that needs it, so do **not** run either one
+elevated.
+
+It clones this repository — to `~/.local/share/firefox-swipe-navigation`, or
+`%LOCALAPPDATA%\firefox-swipe-navigation` — and runs the installer, which lists
+the Firefox installations it found and asks which to install into. The checkout
+is permanent and yours: `swipe-anim.js` stays there and is re-read every time a
+window opens, so you can edit it without root. Re-run the same line any time to
+update.
+
+If piping a script to a shell makes you uneasy — reasonably, since it asks for
+privileges — read it first and run it separately:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.sh -o get.sh
 less get.sh
 bash get.sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.ps1 -OutFile get.ps1
+notepad get.ps1
+powershell -ExecutionPolicy Bypass -File .\get.ps1
 ```
 
 Firefox already tracks a two-finger horizontal trackpad swipe continuously — it
@@ -47,12 +64,18 @@ extension.
   rewrote `gHistorySwipeAnimation` into the form this replaces, including the
   `updateAnimation(delta)` entry point everything here depends on. The installer
   refuses to touch anything older.
-- Linux/GTK. Touchpad swipe-to-navigate shipped on Linux in Firefox 106
-  (bug 1790580), so 111 is the binding constraint.
+- Linux/GTK or Windows. Touchpad swipe-to-navigate shipped on Linux in Firefox
+  106 (bug 1790580), so 111 is the binding constraint on both.
 - Developed and verified against **Firefox 152**. Versions between 111 and 152
   should work but are untested.
-- A trackpad that produces two-finger horizontal pan gestures.
-- Write access to the Firefox installation directory (i.e. `sudo`) once.
+- A trackpad that produces two-finger horizontal pan gestures. On Windows that
+  means a Precision Touchpad: the gesture arrives through Direct Manipulation
+  rather than GTK, but reaches the same `SwipeTracker` and the same front-end
+  entry points.
+- Write access to the Firefox installation directory once — `sudo` on Linux, an
+  elevated shell on Windows. A per-user Firefox under `%LOCALAPPDATA%` is
+  writable as yourself, and the Windows installer will not ask for elevation it
+  does not need.
 
 ## Install
 
@@ -64,13 +87,21 @@ cd firefox-swipe-navigation
 sudo ./install.sh
 ```
 
+```powershell
+git clone https://github.com/steeb-k/firefox-swipe-navigation.git
+cd firefox-swipe-navigation
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
 Clone wherever you like — the location is baked into the loader, so just don't
 move or delete it afterwards.
 
-With no arguments the installer searches the usual locations — `/usr/lib`,
-`/usr/lib64`, `/usr/local/lib`, `/opt`, Snap, Flatpak and a few paths under your
-home directory — and lists what it finds with each version, so you can pick one
-or several:
+With no arguments the installer searches the usual locations and lists what it
+finds with each version, so you can pick one or several. On Linux that is
+`/usr/lib`, `/usr/lib64`, `/usr/local/lib`, `/opt`, Snap, Flatpak and a few
+paths under your home directory; on Windows it is whatever Firefox recorded
+under `HKLM\SOFTWARE\Mozilla` and `HKCU\SOFTWARE\Mozilla`, plus a sweep of
+Program Files and `%LOCALAPPDATA%` for an install that never registered itself:
 
 ```
 Detected Firefox installations:
@@ -90,11 +121,29 @@ SWIPE_ASSUME_ALL=1 sudo ./install.sh                  # every detected install
 SWIPE_EXTRA_DIRS="/custom/path" sudo ./install.sh     # widen the search
 ```
 
-`SWIPE_ASSUME_ALL` and `SWIPE_EXTRA_DIRS` are forwarded by the one-liner too, and
-`SWIPE_HOME` changes where it puts the checkout:
+The Windows installer takes the same three as switches, and adds two of its own:
+
+```powershell
+.\install.ps1 "C:\Program Files\Mozilla Firefox"   # explicit paths
+.\install.ps1 -All                                 # every detected install
+.\install.ps1 -ExtraDirs "D:\firefox"              # widen the search
+.\install.ps1 -List                                # show what would be touched
+.\install.ps1 -Elevate                             # ask UAC rather than report
+```
+
+`-List` needs no privileges and changes nothing, which makes it the safe way to
+see what the detection found.
+
+`SWIPE_ASSUME_ALL` and `SWIPE_EXTRA_DIRS` are forwarded by both one-liners, and
+`SWIPE_HOME` changes where the checkout goes:
 
 ```sh
 SWIPE_ASSUME_ALL=1 SWIPE_HOME=~/src/swipe bash get.sh
+```
+
+```powershell
+$env:SWIPE_ASSUME_ALL = 1; $env:SWIPE_HOME = "D:\src\swipe"
+irm https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.ps1 | iex
 ```
 
 Then quit Firefox completely and restart it.
@@ -110,6 +159,11 @@ keep or drop them.
 ```sh
 cd ~/.local/share/firefox-swipe-navigation   # wherever you cloned it
 sudo ./uninstall.sh
+```
+
+```powershell
+cd $env:LOCALAPPDATA\firefox-swipe-navigation
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
 This lists only the installations that actually have it installed, asks which to
@@ -249,8 +303,8 @@ Both of these are why the defaults above exist.
 **`widget.swipe.pixel-size` bounds how far the page can travel.**
 `SwipeTracker` divides finger displacement by this preference and clamps the
 result to `[-1, 1]`, so the page can never move further than `pixel-size` CSS
-pixels. The Linux default is `1100`, narrower than most viewports, which leaves
-the page stranded partway across the screen. Setting it to the viewport width is
+pixels. The default is `1100` on both platforms, narrower than most viewports,
+which leaves the page stranded partway across the screen. Setting it to the viewport width is
 the one value where 1:1 tracking and a complete traverse are simultaneously
 true, and `swipeAnim.fullTraverse` keeps it there as the window resizes. A side
 effect is that the commit threshold — a hardcoded 25% in `SwipeTracker.cpp` —
@@ -307,8 +361,16 @@ animation that may show the wrong scroll position.
 
 ## Known limitations
 
-- Linux/GTK only. The same entry points exist on macOS and Windows, but nothing
-  here has been tested on either.
+- macOS is untested. The same entry points exist there, but nothing here has
+  been run on it.
+- The Windows support is newer than the Linux support and has been verified on
+  one machine — Firefox 152 ARM64 on Windows 11, at 1.25× display scaling, with
+  a Precision Touchpad. What was checked there specifically: the gesture stream
+  arrives with continuous deltas as it does on GTK; Direct Manipulation's
+  post-release inertia does not disturb the settle animation; fractional display
+  scaling neither blurs nor misaligns a snapshot; and reversing mid-gesture
+  stays positional rather than jumping. Other hardware, a second display at a
+  different scale, and touchscreen panning have not been exercised.
 - The snapshot cache holds four entries per tab, evicting whichever is furthest
   from the current position, and twenty-four across the window, evicting from
   the least recently used tab first. Swiping to a page beyond that falls back to
