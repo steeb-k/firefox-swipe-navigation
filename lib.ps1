@@ -245,6 +245,43 @@ function Select-SwipeInstall {
     return $picks
 }
 
+# Single-quotes a string for a PowerShell command line, doubling any quote it
+# already contains. Used to rebuild this invocation for the elevated relaunch.
+function Get-SwipeQuoted {
+    param([string] $S)
+    return "'" + ($S -replace "'", "''") + "'"
+}
+
+# Rebuilds the current invocation as a -Command string for an elevated relaunch.
+#
+# -File cannot be used for this. It passes every argument to the child as a
+# literal string, so a [string[]] parameter handed "a","b" that way arrives as
+# the single string 'a,b' and the second directory is silently lost. -Command
+# gives the child real PowerShell to parse, which is the only form an array
+# survives.
+function Get-SwipeRelaunchArgs {
+    param(
+        [string] $ScriptPath,
+        [switch] $All,
+        [string[]] $ExtraDirs,
+        [string[]] $Path
+    )
+    $inner = "& " + (Get-SwipeQuoted $ScriptPath)
+    if ($All) { $inner += " -All" }
+    if ($ExtraDirs) {
+        $inner += " -ExtraDirs " + (($ExtraDirs | ForEach-Object { Get-SwipeQuoted $_ }) -join ",")
+    }
+    foreach ($p in $Path) { $inner += " " + (Get-SwipeQuoted $p) }
+
+    # Start-Process joins ArgumentList with spaces and quotes nothing itself, so
+    # the command has to arrive as one already-quoted argument. Everything
+    # inside it is single-quoted, and Windows does not permit a double quote in
+    # a path, so wrapping in double quotes is safe.
+    # -NoExit keeps the result readable: a UAC window that closes on completion
+    # reports nothing.
+    return @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "`"$inner`"")
+}
+
 # Firefox reads mozilla.cfg and local-settings.js as plain bytes; a UTF-8 BOM in
 # the pref file is not something to find out about the hard way.
 function Write-SwipeTextFile {

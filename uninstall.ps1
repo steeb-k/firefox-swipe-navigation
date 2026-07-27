@@ -37,25 +37,31 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackupRoot = $env:SWIPE_BACKUP_ROOT
 if ([string]::IsNullOrWhiteSpace($BackupRoot)) { $BackupRoot = Join-Path $Here "backups" }
 
+$records = @()
 if ($Path -and $Path.Count -gt 0) {
-    $selected = $Path
+    $candidates = $Path
 } else {
     $records = @(Get-SwipeInstall -ExtraDirs $ExtraDirs)
-    $selected = @(Select-SwipeInstall -Mode "uninstall" -MinVersion "" -Records $records -AssumeAll:$All)
-    if (-not $selected -or $selected.Count -eq 0) { exit 1 }
+    # Only the installations that actually carry an install are candidates here,
+    # which is the same set the selection prompt will offer.
+    $candidates = @($records | Where-Object { $_.Installed } | ForEach-Object { $_.Path })
 }
 
 # As in install.ps1: what matters is whether the target can be written, not
-# whether this shell happens to be elevated.
-$needsElevation = @($selected | Where-Object {
+# whether this shell happens to be elevated -- and the question has to be
+# settled before the selection prompt, so that relaunching elevated does not
+# mean answering it twice.
+$needsElevation = @($candidates | Where-Object {
         (Test-Path -LiteralPath $_ -PathType Container) -and -not (Test-SwipeWritable -Dir $_)
     })
 if ($needsElevation.Count -gt 0 -and -not (Test-SwipeAdmin)) {
     if ($Elevate) {
-        $argList = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", "`"$($MyInvocation.MyCommand.Path)`"")
-        if ($All) { $argList += "-All" }
-        foreach ($p in $Path) { $argList += "`"$p`"" }
-        Write-Host "Relaunching elevated; accept the UAC prompt."
+        $argList = Get-SwipeRelaunchArgs -ScriptPath $MyInvocation.MyCommand.Path `
+            -All:$All -ExtraDirs $ExtraDirs -Path $Path
+        Write-Host "Administrator rights are needed to write into:"
+        foreach ($d in $needsElevation) { Write-Host "  $d" }
+        Write-Host ""
+        Write-Host "Accept the UAC prompt; the uninstall continues in the window it opens."
         Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList
         exit 0
     }
@@ -70,6 +76,13 @@ if ($needsElevation.Count -gt 0 -and -not (Test-SwipeAdmin)) {
     Write-Host "Or re-run this with -Elevate to be prompted by UAC."
     Write-Host ""
     exit 1
+}
+
+if ($Path -and $Path.Count -gt 0) {
+    $selected = $Path
+} else {
+    $selected = @(Select-SwipeInstall -Mode "uninstall" -MinVersion "" -Records $records -AssumeAll:$All)
+    if (-not $selected -or $selected.Count -eq 0) { exit 1 }
 }
 
 Write-Host ""
