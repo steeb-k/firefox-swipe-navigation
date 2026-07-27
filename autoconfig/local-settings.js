@@ -1,5 +1,13 @@
 // Autoconfig bootstrap for the 1:1 swipe navigation animation.
 // Installed to <firefox-install-dir>/defaults/pref/local-settings.js
+//
+// firefox-swipe-navigation-marker
+//
+// The marker is what tells the installers this file is one of ours. Without it
+// a second install reads its own predecessor as a pre-existing stranger's file,
+// backs it up, and restores it on uninstall -- leaving general.config.filename
+// pointing at a mozilla.cfg that has just been removed, which Firefox reports
+// as a configuration error on the next start.
 pref("general.config.filename", "mozilla.cfg");
 pref("general.config.obscure_value", 0);
 pref("general.config.sandbox_enabled", false);
