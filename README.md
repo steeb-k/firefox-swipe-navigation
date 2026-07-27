@@ -33,6 +33,13 @@ is permanent and yours: `swipe-anim.js` stays there and is re-read every time a
 window opens, so you can edit it without root. Re-run the same line any time to
 update.
 
+On Windows git is optional. With git installed the checkout is a clone and
+re-running the line is a `git pull`, which is what lets it keep your edits.
+Without it the source is downloaded as a zip and re-running re-downloads;
+since there is then no history to tell your changes from upstream's, a refresh
+that would overwrite a file you have modified stops and says which file rather
+than guessing.
+
 If piping a script to a shell makes you uneasy — reasonably, since it asks for
 privileges — read it first and run it separately:
 
@@ -47,6 +54,9 @@ irm https://raw.githubusercontent.com/steeb-k/firefox-swipe-navigation/main/get.
 notepad get.ps1
 powershell -ExecutionPolicy Bypass -File .\get.ps1
 ```
+
+The `-ExecutionPolicy Bypass` in that last line is not incidental — see
+[below](#why-every-windows-command-here-says--executionpolicy-bypass).
 
 Firefox already tracks a two-finger horizontal trackpad swipe continuously — it
 just slides a small arrow indicator across the viewport rather than moving the
@@ -124,15 +134,33 @@ SWIPE_EXTRA_DIRS="/custom/path" sudo ./install.sh     # widen the search
 The Windows installer takes the same three as switches, and adds two of its own:
 
 ```powershell
-.\install.ps1 "C:\Program Files\Mozilla Firefox"   # explicit paths
-.\install.ps1 -All                                 # every detected install
-.\install.ps1 -ExtraDirs "D:\firefox"              # widen the search
-.\install.ps1 -List                                # show what would be touched
-.\install.ps1 -Elevate                             # ask UAC rather than report
+powershell -ExecutionPolicy Bypass -File .\install.ps1 "C:\Program Files\Mozilla Firefox"
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -All        # every detected install
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ExtraDirs "D:\firefox"
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -List       # show, change nothing
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Elevate    # ask UAC rather than report
 ```
 
 `-List` needs no privileges and changes nothing, which makes it the safe way to
 see what the detection found.
+
+### Why every Windows command here says `-ExecutionPolicy Bypass`
+
+A stock Windows install is set to `Restricted`, which refuses to run a `.ps1`
+file at all — including one you wrote yourself, and including a script that
+merely dot-sources another. `-ExecutionPolicy Bypass` lifts that for one
+invocation without changing any policy on the machine, which is why every
+command above carries it and why the installer launches with it internally.
+
+The one-liner needs none of this: text piped to `iex` is a string rather than a
+file, and that is a path execution policy does not govern. If you would rather
+lift the restriction once and type less, that is
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` — a change to your account
+rather than to a single command, so it is worth knowing you made it.
+
+The one case nothing here can route around is an execution policy set by Group
+Policy, since machine and user policy outrank a command line switch. On a
+managed machine, that is a conversation with whoever manages it.
 
 `SWIPE_ASSUME_ALL` and `SWIPE_EXTRA_DIRS` are forwarded by both one-liners, and
 `SWIPE_HOME` changes where the checkout goes:
