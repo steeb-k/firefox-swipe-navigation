@@ -22,11 +22,43 @@ try {
     if (!svc) {
       return;
     }
+    const iface = (typeof Ci !== "undefined" && Ci) || Components.interfaces;
+
+    // Firefox 155 dropped file: from the schemes loadSubScript will accept, and
+    // a payload outside the browser is exactly what it now refuses: it throws
+    // "Trying to load untrusted URI." for any file: URL, wherever it lives --
+    // inside the install directory included. resource: is still trusted, so map
+    // the checkout's directory onto a resource: substitution and load through
+    // that. The payload stays where it is and stays editable without root; only
+    // the URL Firefox is handed changes.
+    //
+    // Falls back to the bare file: URL, which is what every version up to 154
+    // wants and what still works there, so a failure here is not fatal.
+    let loadURL = PAYLOAD_URL;
+    try {
+      const payloadURI = svc.io.newURI(PAYLOAD_URL);
+      // "." resolved against the payload is its containing directory -- built
+      // from the URI rather than by trimming the string, so the drive-letter and
+      // percent-encoding differences between platforms stay someone else's
+      // problem.
+      svc.io
+        .getProtocolHandler("resource")
+        .QueryInterface(iface.nsIResProtocolHandler)
+        .setSubstitution(
+          "firefox-swipe-navigation",
+          svc.io.newURI(".", null, payloadURI)
+        );
+      loadURL =
+        "resource://firefox-swipe-navigation/" +
+        payloadURI.QueryInterface(iface.nsIURL).fileName;
+    } catch (e) {
+      Cu.reportError("[swipe-anim] resource: substitution failed: " + e);
+    }
 
     function loadInto(win) {
       try {
         // Cache-bust so a restart always picks up the edited payload.
-        svc.scriptloader.loadSubScript(PAYLOAD_URL + "?v=" + Date.now(), win);
+        svc.scriptloader.loadSubScript(loadURL + "?v=" + Date.now(), win);
         if (win.SwipeAnim) {
           win.SwipeAnim.install(win);
         }
