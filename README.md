@@ -78,8 +78,13 @@ extension.
   refuses to touch anything older.
 - Linux/GTK, Windows or macOS. Touchpad swipe-to-navigate shipped on Linux in
   Firefox 106 (bug 1790580), so 111 is the binding constraint everywhere.
-- Developed and verified against **Firefox 152**. Versions between 111 and 152
-  should work but are untested.
+- Developed and verified against **Firefox 152**, and since re-verified on
+  **154** and **155**. Versions between 111 and 155 should work but are
+  untested.
+- **Firefox 155 changed how the payload has to be reached.** `loadSubScript` no
+  longer accepts `file:` URLs, so an installation made before that change is
+  silently inert on 155 — the browser starts perfectly with none of this in it.
+  Re-running the install line updates the loader and fixes it.
 - A trackpad that produces two-finger horizontal pan gestures. On Windows that
   means a Precision Touchpad: the gesture arrives through Direct Manipulation
   rather than GTK, but reaches the same `SwipeTracker` and the same front-end
@@ -286,7 +291,13 @@ supported way to run privileged JavaScript at startup:
 - `defaults/pref/local-settings.js` points Firefox at `mozilla.cfg` and disables
   the autoconfig sandbox.
 - `mozilla.cfg` is a small loader that reads `swipe-anim.js` into each browser
-  window and calls `SwipeAnim.install(window)`.
+  window and calls `SwipeAnim.install(window)`. It reaches the payload through a
+  `resource:` substitution mapped onto the checkout's directory, because Firefox
+  155 dropped `file:` from the schemes `loadSubScript` will accept — and no
+  `file:` URL escapes that, including one inside the installation directory
+  itself. `resource:` stays trusted, which is what lets the payload go on living
+  in your home directory and go on being editable without root. The bare `file:`
+  URL remains as a fallback, since every version through 154 takes either.
 - `swipe-anim.js` overrides the four `gHistorySwipeAnimation` entry points.
 
 Page imagery comes from `WindowGlobalParent.drawSnapshot()` — the same approach
@@ -422,6 +433,14 @@ neutralises the velocity terms so the decision is purely positional, which makes
 the clamp unreachable.
 
 ## Troubleshooting
+
+If nothing happens at all — no animation, and `SwipeAnim` undefined in the
+Browser Console — the payload never loaded, and the console is the only place
+that says so. The loader reports its failures as `[swipe-anim]` lines and is
+otherwise silent, because a browser that started normally without the payload
+looks exactly like one that never had it installed. The likeliest cause is an
+installation predating the `resource:` loader now running on Firefox 155; see
+[Requirements](#requirements). Re-running the install line fixes it.
 
 Two helpers are available in the Browser Console (`Ctrl+Shift+J`):
 
