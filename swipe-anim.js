@@ -611,8 +611,13 @@ var SwipeAnim = {
     // roughly -- see _captureScale for why dpr*zoom, which is what
     // ext-tabs-base.js passes, is a fraction of a percent wrong.
     //
-    // The fourth argument is resetScrollPosition, and it must stay false: true
-    // would reinstate precisely the bug described above.
+    // There is deliberately no fourth argument. It is resetScrollPosition, which
+    // must stay false -- true would reinstate precisely the bug described above
+    // -- but false is the default, and saying so out loud is not portable:
+    // through 154 it is a boolean, and from 155 it is a dictionary
+    // ({ resetScrollPosition }), where a bare false throws "Argument 4 can't be
+    // converted to a dictionary." and every capture fails. Leaving it off means
+    // the same thing on both.
     const zoom = browser.fullZoom || 1;
     const dpr = win.devicePixelRatio;
     let bmp;
@@ -620,8 +625,7 @@ var SwipeAnim = {
       bmp = await wgp.drawSnapshot(
         null,
         this._captureScale(dpr, zoom),
-        "white",
-        false
+        "white"
       );
     } catch (e) {
       // drawSnapshot rejects (often NS_ERROR_LOSS_OF_SIGNIFICANT_DATA) when the
@@ -646,7 +650,9 @@ var SwipeAnim = {
         tab: rec.id,
         idx,
         url,
-        error: String(e && (e.name || e.message || e)),
+        // Name AND message: the name alone once reported a changed drawSnapshot
+        // signature as just "TypeError", which says nothing about the cause.
+        error: e && e.name ? `${e.name}: ${e.message}` : String(e),
         markedStale: !!stalePrev,
         at: new Date().toTimeString().slice(0, 8),
       };
@@ -1054,15 +1060,29 @@ var SwipeAnim = {
     }, 220);
   },
 
-  _onUpdate(state, aVal) {
+  // What updateAnimation is handed changed shape in Firefox 155: a bare delta
+  // through 154, and from 155 an object, { event, delta }. Everything here
+  // works on the number; the stock functions must be given back whatever form
+  // this Firefox speaks, so callers keep the original around for delegation.
+  //
+  // Getting this wrong is silent. An object is neither > 0 nor < 0, so the
+  // gesture reads as a swipe toward an entry that does not exist: the page stays
+  // put, and the no-snapshot fallback to the arrows is never reached either.
+  _deltaOf(aUpdate) {
+    const v = typeof aUpdate === "number" ? aUpdate : aUpdate?.delta;
+    return Number.isFinite(v) ? v : 0;
+  },
+
+  _onUpdate(state, aUpdate) {
     const win = state.win;
     // Once we have handed a gesture to the stock arrow UI, stay out of the way.
     if (state.delegating) {
       try {
-        state.origFns.updateAnimation.call(win.gHistorySwipeAnimation, aVal);
+        state.origFns.updateAnimation.call(win.gHistorySwipeAnimation, aUpdate);
       } catch (e) {}
       return;
     }
+    const aVal = this._deltaOf(aUpdate);
     const g = state.gesture;
     if (!g || !state.underlay) {
       return;
@@ -1135,7 +1155,7 @@ var SwipeAnim = {
     if (!inc.hasSnapshot) {
       this._beginDelegate(
         state,
-        aVal,
+        aUpdate,
         goingBack,
         inc.target,
         inc.mismatch
@@ -1181,7 +1201,9 @@ var SwipeAnim = {
   },
 
   // Fall back to Firefox's own arrow indicator for this gesture.
-  _beginDelegate(state, aVal, goingBack, targetIdx, reason) {
+  // aUpdate is updateAnimation's argument untouched -- see _deltaOf -- because
+  // it goes straight back into the stock function.
+  _beginDelegate(state, aUpdate, goingBack, targetIdx, reason) {
     const win = state.win;
     const anim = win.gHistorySwipeAnimation;
     const g = state.gesture;
@@ -1209,7 +1231,7 @@ var SwipeAnim = {
     state.delegating = true;
     try {
       state.origFns.startAnimation.call(anim);
-      state.origFns.updateAnimation.call(anim, aVal);
+      state.origFns.updateAnimation.call(anim, aUpdate);
     } catch (e) {
       win.console.error("[swipe-anim] delegate", e);
     }
